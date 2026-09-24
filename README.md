@@ -339,6 +339,16 @@ full 数据集与发布的 `minimind-3o` / `minimind-3o-moe` 权重对应，覆�
 
 训练模式里，`all` 会更新 MiniMind / Talker / projector，`audio_proj` 和 `vision_proj` 只用于单独对齐对应投影层；SenseVoice-Small、TIPSv2 和 Mimi 始终冻结。Dense 与 MoE 版本沿用同一套数据顺序。mini 命令只用于快速跑通链路，默认单卡 3090 约 2 小时完成；发布权重对应 full 数据训练。
 
+要用 full 数据训练同样约 0.1B 的 Dense 模型，先下载完整训练文件：
+
+```bash
+HF_ENDPOINT=https://huggingface.co hf download jingyaogong/minimind-o_dataset \
+  sft_t2a.parquet sft_a2a.parquet sft_i2t.parquet \
+  --repo-type dataset --local-dir ./dataset
+```
+
+然后运行 `bash trainer/train_full_dense.sh`。脚本按上面的 T2A、A2A、I2T 顺序训练七个阶段，为阶段保留独立断点，并将最终权重写入 `out/sft_omni_768.pth`。默认使用 4 卡 DDP、每卡 batch 32；可用 `CUDA_VISIBLE_DEVICES`、`NPROC_PER_NODE` 和 `BATCH_SIZE` 覆盖。运行前可设置 `DRY_RUN=1` 检查命令计划而不启动训练。
+
 ### MiniMind 训练能力在 MiniMind-O 中的对应入口
 
 MiniMind 上游 `trainer/` 中与语言模型训练相关的能力，已适配到根仓库 `trainer/`，并使用 MiniMind-O 的模型、tokenizer 与 checkpoint 格式。文本预训练、文本 SFT、LoRA、蒸馏和偏好/RL 入口目前只训练 Thinker 文本路径；音频和图像监督通过上面的 `train_sft_omni.py` 完成。视频目前支持均匀抽帧、时间标记和模型推理输入；仓库尚未提供视频监督数据集适配器，因此训练视频时序理解需要先准备相应数据并扩展数据管线。
