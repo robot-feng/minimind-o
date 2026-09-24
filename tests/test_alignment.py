@@ -18,6 +18,7 @@ from trainer.rollout_engine import RolloutResult, SGLangRolloutEngine, TorchRoll
 from trainer.training_losses import causal_lm_loss, masked_distillation_loss
 from trainer.ppo_utils import clipped_value_loss, generalized_advantage_estimate, ppo_policy_loss
 from trainer.train_ppo import PPOValueModel, _trainable_value, train_batch
+from trainer.train_agent import collect_agent_rollouts
 from trainer.train_tokenizer import get_texts, train_tokenizer
 
 
@@ -477,6 +478,106 @@ class TestAgentTools(unittest.TestCase):
         tools = [{"type": "function", "function": {"name": "calculate_math"}}]
         reward = calculate_agent_reward("The answer is 8.", [text], tools, ["7"])
         self.assertLess(reward, 0.0)
+
+    def test_agent_rollout_executes_tool_and_resumes_conversation(self):
+        class Encoding:
+            def __init__(self, input_ids):
+                self.input_ids = input_ids
+                self.attention_mask = torch.ones_like(input_ids)
+
+            def to(self, device):
+                self.input_ids = self.input_ids.to(device)
+                self.attention_mask = self.attention_mask.to(device)
+                return self
+
+        class Tokenizer:
+            def __init__(self):
+                self.rendered = []
+
+            def apply_chat_template(self, messages, **kwargs):
+                text = json.dumps(messages, ensure_ascii=False)
+                self.rendered.append(text)
+                return text
+
+            def __call__(self, texts, **kwargs):
+                rows = [torch.tensor([len(text) % 17 + 1, 2]) for text in texts]
+                return Encoding(torch.stack(rows))
+
+        class Engine:
+            def __init__(self, completions):
+                self.completion_batches = iter(completions)
+
+            def rollout(self, input_ids, attention_mask, **kwargs):
+                completions = next(self.completion_batches)
+                ids = torch.arange(20, 20 + len(completions)).unsqueeze(1)
+                return RolloutResult(
+                    output_ids=torch.cat((input_ids, ids), dim=1),
+                    completion_ids=ids,
+                    per_token_logps=torch.full(ids.shape, -0.25),
+                    completions=completions,
+                    prompt_lens=attention_mask.sum(dim=1),
+                    completion_mask=torch.ones_like(ids),
+                )
+
+        tool_call = '<tool_call>{"name":"calculate_math","arguments":{"expression":"6 * 7"}}</tool_call>'
+        tokenizer = Tokenizer()
+        episodes = collect_agent_rollouts(
+            {
+                "messages": [[{"role": "user", "content": "What is 6 times 7?"}]],
+                "tools": [[{"type": "function", "function": {"name": "calculate_math"}}]],
+                "gt": [["42"]],
+            },
+            Engine([[tool_call, "Other answer"], ["42"]]),
+            tokenizer,
+            SimpleNamespace(num_generations=2, max_turns=2, max_seq_len=64,
+                             max_gen_len=8, device="cpu", thinking_ratio=0.0),
+        )
+
+        self.assertEqual(len(episodes), 2)
+        self.assertEqual(episodes[0]["turns"], [tool_call, "42"])
+        self.assertEqual(episodes[0]["final"], "42")
+        self.assertFalse(episodes[0]["unfinished"])
+        self.assertEqual(len(episodes[0]["actions"]), 2)
+        self.assertEqual(episodes[1]["turns"], ["Other answer"])
+        self.assertEqual(len(episodes[1]["actions"]), 1)
+        tool_message = json.loads(tokenizer.rendered[-1])[-1]
+        self.assertEqual(tool_message["role"], "tool")
+        self.assertEqual(json.loads(tool_message["content"]), {"result": "42"})
+
+    def test_agent_rollout_marks_tool_call_at_turn_limit_unfinished(self):
+        class Encoding:
+            def __init__(self, input_ids):
+                self.input_ids = input_ids
+                self.attention_mask = torch.ones_like(input_ids)
+
+            def to(self, device):
+                return self
+
+        class Tokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                return "prompt"
+
+            def __call__(self, texts, **kwargs):
+                return Encoding(torch.ones(len(texts), 2, dtype=torch.long))
+
+        class Engine:
+            def rollout(self, input_ids, attention_mask, **kwargs):
+                completion = '<tool_call>{"name":"calculate_math","arguments":{"expression":"1+1"}}</tool_call>'
+                ids = torch.ones(len(input_ids), 1, dtype=torch.long)
+                return RolloutResult(input_ids, ids, torch.zeros_like(ids, dtype=torch.float32),
+                                     [completion] * len(input_ids), attention_mask.sum(1),
+                                     torch.ones_like(ids))
+
+        episodes = collect_agent_rollouts(
+            {"messages": [[{"role": "user", "content": "Compute."}]],
+             "tools": [[]], "gt": [["2"]]},
+            Engine(), Tokenizer(),
+            SimpleNamespace(num_generations=2, max_turns=1, max_seq_len=64,
+                             max_gen_len=8, device="cpu", thinking_ratio=0.0),
+        )
+        self.assertEqual(len(episodes), 2)
+        self.assertTrue(all(episode["unfinished"] for episode in episodes))
+        self.assertEqual([len(episode["actions"]) for episode in episodes], [1, 1])
 
 
 class TestTokenizerTraining(unittest.TestCase):
