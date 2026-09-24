@@ -124,7 +124,8 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             clean_state_dict = {k: v for k, v in raw_model.state_dict().items() if not k.startswith('audio_encoder.')}
             torch.save({k: v.half().cpu() for k, v in clean_state_dict.items()}, ckp)
             omni_checkpoint(omni_config, weight=args.save_weight, model=model, optimizer=optimizer, 
-                          epoch=epoch, step=step, wandb=wandb, save_dir='../checkpoints', scaler=scaler)
+                          epoch=epoch, step=step, wandb=wandb, save_dir='../checkpoints',
+                          batch_size=args.batch_size, scaler=scaler)
             model.train()
 
         del input_ids, labels, audio_labels, audio_inputs, audio_lens, pixel_values, spk_emb, res, loss
@@ -180,7 +181,9 @@ if __name__ == "__main__":
         num_hidden_layers=args.num_hidden_layers, 
         use_moe=bool(args.use_moe)
     )
-    ckp_data = omni_checkpoint(omni_config, weight=args.save_weight, save_dir='../checkpoints') if args.from_resume==1 else None
+    ckp_data = omni_checkpoint(
+        omni_config, weight=args.save_weight, save_dir='../checkpoints', batch_size=args.batch_size
+    ) if args.from_resume == 1 else None
     
     # ========== 3. 设置混合精度 ==========
     device_type = "cuda" if "cuda" in args.device else "cpu"

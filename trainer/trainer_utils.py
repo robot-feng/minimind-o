@@ -63,6 +63,15 @@ def log_model_params(model, ignore_patterns=['audio_encoder', 'vision_encoder'])
     else: Logger(f'Model Params: {total:.2f}M')
 
 
+def rescale_resume_step(step, saved_world_size, current_world_size,
+                       saved_batch_size=None, current_batch_size=None):
+    if saved_batch_size is not None and current_batch_size is not None:
+        saved_global_batch = saved_batch_size * saved_world_size
+        current_global_batch = current_batch_size * current_world_size
+        return step * saved_global_batch // current_global_batch
+    return step * saved_world_size // current_world_size
+
+
 def init_omni_model(omni_config, from_weight='full_sft', tokenizer_path='../model', audio_encoder_path='../model/SenseVoiceSmall', vision_model_path='google/tipsv2-b14', save_dir='../out', device='cuda', freeze_backbone='none', from_resume=0):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = MiniMindOmni(omni_config, audio_encoder_path=audio_encoder_path, vision_model_path=vision_model_path)
@@ -105,7 +114,7 @@ def init_omni_model(omni_config, from_weight='full_sft', tokenizer_path='../mode
     return model.to(device), tokenizer
 
 
-def omni_checkpoint(omni_config, weight='pretrain_omni', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='../checkpoints', **kwargs):
+def omni_checkpoint(omni_config, weight='pretrain_omni', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='../checkpoints', batch_size=None, **kwargs):
     os.makedirs(save_dir, exist_ok=True)
     moe_path = '_moe' if omni_config.use_moe else ''
     ckp_path = f'{save_dir}/{weight}_{omni_config.hidden_size}{moe_path}.pth'
@@ -138,6 +147,8 @@ def omni_checkpoint(omni_config, weight='pretrain_omni', model=None, optimizer=N
             'world_size': dist.get_world_size() if dist.is_initialized() else 1,
             'wandb_id': wandb_id
         }
+        if batch_size is not None:
+            resume_data['batch_size'] = batch_size
         for key, value in kwargs.items():
             if value is not None:
                 if hasattr(value, 'state_dict'):
@@ -156,9 +167,20 @@ def omni_checkpoint(omni_config, weight='pretrain_omni', model=None, optimizer=N
             ckp_data = torch.load(resume_path, map_location='cpu')
             saved_ws = ckp_data.get('world_size', 1)
             current_ws = dist.get_world_size() if dist.is_initialized() else 1
-            if saved_ws != current_ws:
-                ckp_data['step'] = ckp_data['step'] * saved_ws // current_ws
-                Logger(f'GPU数量变化({saved_ws}→{current_ws})，step已自动转换为{ckp_data["step"]}')
+            saved_batch_size = ckp_data.get('batch_size')
+            if saved_batch_size is not None and batch_size is not None:
+                saved_global_batch = saved_batch_size * saved_ws
+                current_global_batch = batch_size * current_ws
+                if saved_global_batch != current_global_batch:
+                    ckp_data['step'] = rescale_resume_step(
+                        ckp_data['step'], saved_ws, current_ws, saved_batch_size, batch_size
+                    )
+                    Logger(f'全局 batch 变化({saved_global_batch}→{current_global_batch})，step已转换为{ckp_data["step"]}')
+            elif saved_ws != current_ws:
+                ckp_data['step'] = rescale_resume_step(
+                    ckp_data['step'], saved_ws, current_ws
+                )
+                Logger(f'GPU数量变化({saved_ws}→{current_ws})，step已转换为{ckp_data["step"]}')
             return ckp_data
         return None
 

@@ -210,12 +210,12 @@ print(torch.cuda.is_available())
 
 ### 2' 开始训练
 
-推荐 mini 训练管线如下，默认在 `trainer/` 目录下执行，可直接 `cd trainer && bash train.sh`：
+推荐 mini 训练管线如下，默认使用 4 卡 DDP，在 `trainer/` 目录下执行，可直接 `cd trainer && bash train.sh`。`--batch_size` 是每个进程的 batch；下面的 10 / 10 / 4 分别对应全局 batch 40 / 40 / 16。单卡运行时将 `--nproc_per_node` 改为 1，并把每阶段的 batch 改为 40 / 40 / 16：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_t2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 1 --from_weight llm --save_weight sft_zero --max_seq_len 512 --use_moe 0
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 640 --mode audio_proj --use_moe 0
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 2e-5 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 16 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 768 --use_moe 0
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_t2a_mini.parquet --epochs 1 --batch_size 10 --use_compile 1 --from_weight llm --save_weight sft_zero --max_seq_len 512 --use_moe 0
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 10 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 640 --mode audio_proj --use_moe 0
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --learning_rate 2e-5 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 4 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 768 --use_moe 0
 
 以上默认不上传指标；如已配置 SwanLab，可在命令中追加 `--use_wandb`。
 ```

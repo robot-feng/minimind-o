@@ -211,12 +211,12 @@ For a quick start, downloading only the `_mini` parquet files from the [dataset 
 
 ### 2' Train
 
-The recommended mini training pipeline is shown below. It is meant to be run from the `trainer/` directory; equivalently, run `cd trainer && bash train.sh`:
+The recommended mini training pipeline uses 4-GPU DDP and should be run from the `trainer/` directory; equivalently, run `cd trainer && bash train.sh`. `--batch_size` is per process, so 10 / 10 / 4 below preserve global batch sizes 40 / 40 / 16. For one GPU, set `--nproc_per_node 1` and use per-process batches 40 / 40 / 16:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_t2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 1 --from_weight llm --save_weight sft_zero --max_seq_len 512 --use_moe 0
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 640 --mode audio_proj --use_moe 0
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 2e-5 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 16 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 768 --use_moe 0
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_t2a_mini.parquet --epochs 1 --batch_size 10 --use_compile 1 --from_weight llm --save_weight sft_zero --max_seq_len 512 --use_moe 0
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 10 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 640 --mode audio_proj --use_moe 0
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --learning_rate 2e-5 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 4 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 768 --use_moe 0
 
 The defaults do not upload metrics. Append `--use_wandb` if SwanLab is configured.
 ```

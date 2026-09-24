@@ -18,8 +18,8 @@
 # CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --learning_rate 5e-6 --data_path ../dataset/sft_i2t.parquet --epochs 1 --batch_size 32 --use_compile 1 --from_weight sft_omni --save_weight sft_omni --max_seq_len 768 --mode vision_proj --use_wandb --use_moe 1 # epochs * 45min
 
 
-# ==================== (Recommend) Mini dataset training pipeline ====================
-# Time estimates below are based on 1x RTX 3090, for reference only and may not be entirely accurate.
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_t2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 1 --from_weight llm --save_weight sft_zero --max_seq_len 512 --use_moe 0 # epochs * 60min
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 640 --mode audio_proj --use_moe 0 # epochs * 15min
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 2e-5 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 16 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 768 --use_moe 0 # epochs * 15min
+# ==================== Mini dataset training pipeline (4-GPU DDP) ====================
+# Per-process batches 10/10/4 preserve the original global batches 40/40/16.
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_t2a_mini.parquet --epochs 1 --batch_size 10 --use_compile 1 --from_weight llm --save_weight sft_zero --max_seq_len 512 --use_moe 0
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 10 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 640 --mode audio_proj --use_moe 0
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --learning_rate 2e-5 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 4 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 768 --use_moe 0
