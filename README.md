@@ -72,6 +72,7 @@ MiniMind-O 尝试补上已知的空位：让语音和文本在 hidden state 层�
 - 提供 mini 与 full 两套训练数据：mini 便于快速入门，单卡 3090 上约 2 小时可跑通；full 与发布权重对应，覆盖中文语音与图像任务。
 - 提供多种内置音色、unseen 音色与任意参考音频的音色克隆能力，便于复现音色控制实验。
 - 提供完整的推理与 Demo 工具，支持 CLI 推理、Web UI、流式播放、barge-in 打断和电话模式。
+- 图像使用 TIPSv2 B/14；视频输入按时间均匀抽取最多 4 帧，每帧复用相同图像编码路径。
 - 关键模块均从 0 用 PyTorch 原生实现，不依赖三方高层封装；同时兼容 `transformers` Tokenizer 与原生权重格式。
 - 配套技术报告覆盖架构、训练曲线、CER / WER 评估、音色克隆相似度与跨模型对比，链接见顶部 Tech Report 区。
 
@@ -92,7 +93,7 @@ MiniMind-O 尝试补上已知的空位：让语音和文本在 hidden state 层�
 - MiniMind-O 首次开源，发布 `minimind-3o`（115M）与 `minimind-3o-moe`（312M-A115M）
 - Thinker–Talker 双路径架构，Talker 采用 MTP 预测多层 Mimi codes，支持 24 kHz 流式语音生成与 barge-in 打断
 - 音频编解码器采用 Mimi（8 层 codebook，12.5 Hz，24 kHz），Talker 在 codebook 接口上使用共享主体与轻量 adapter
-- 语音 / 视觉特征分别由冻结的 SenseVoice-Small 与 SigLIP2 编码，再通过两层 MLP projector 注入 MiniMind 隐空间
+- 语音 / 视觉特征分别由冻结的 SenseVoice-Small 与 TIPSv2-B/14 编码，再通过两层 MLP projector 注入 MiniMind 隐空间
 - 同步发布 mini 与 full 两套训练数据，mini 单卡 3090 ~2h 即可跑通整条 Thinker–Talker 链路
 - 内置 5 个 voice prompt + 7 个 unseen voice prompt，提供音色克隆与电话模式 WebUI
 
@@ -130,8 +131,8 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```bash
 # 下载 SenseVoice-Small 语音编码器到 ./model/SenseVoiceSmall
 modelscope download --model gongjy/SenseVoiceSmall --local_dir ./model/SenseVoiceSmall
-# 下载 SigLIP2 视觉编码器到 ./model/siglip2-base-p32-256-ve
-modelscope download --model gongjy/siglip2-base-p32-256-ve --local_dir ./model/siglip2-base-p32-256-ve
+# TIPSv2 首次运行时会从 Hugging Face 自动下载；也可预先下载已验证版本到本地
+HF_ENDPOINT=https://huggingface.co hf download google/tipsv2-b14 --revision ed1e4dc6b74bf3935ae099e9d5eb30fa96528454 --local-dir ./model/tipsv2-b14
 # 下载 Mimi 音频编解码器到 ./model/mimi
 modelscope download --model gongjy/mimi --local_dir ./model/mimi
 # 下载 CAMPPlus 说话人编码器到 ./model/campplus
@@ -148,7 +149,7 @@ modelscope download --model gongjy/minimind-3o-pytorch llm_768.pth --local_dir .
 minimind-o/
 ├── model/
 │   ├── SenseVoiceSmall/
-│   ├── siglip2-base-p32-256-ve/
+│   ├── tipsv2-b14/              # 可选；不下载时使用 Hugging Face 模型 ID
 │   ├── mimi/
 │   ├── campplus/
 │   └── ...
@@ -205,16 +206,18 @@ print(torch.cuda.is_available())
 
 ### 1' 下载数据
 
-快速开始时，推荐从[数据集链接](https://huggingface.co/datasets/jingyaogong/minimind-o_dataset)只下载 `_mini` 数据集，并放到 `./dataset` 下。
+快速开始时，推荐从[数据集链接](https://huggingface.co/datasets/jingyaogong/minimind-o_dataset)只下载 `_mini` 数据集，并放到 `./dataset` 下。mini 数据没有图像或视频样本，所以这条小模型训练管线复现语音能力；视频输入链路可在训练后用自己的视频做推理验证。
 
 ### 2' 开始训练
 
 推荐 mini 训练管线如下，默认在 `trainer/` 目录下执行，可直接 `cd trainer && bash train.sh`：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_t2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 1 --from_weight llm --save_weight sft_zero --max_seq_len 512 --use_wandb --use_moe 0
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 640 --mode audio_proj --use_wandb --use_moe 0
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 2e-5 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 16 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 768 --use_wandb --use_moe 0
+CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_t2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 1 --from_weight llm --save_weight sft_zero --max_seq_len 512 --use_moe 0
+CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 640 --mode audio_proj --use_moe 0
+CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 2e-5 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 16 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 768 --use_moe 0
+
+以上默认不上传指标；如已配置 SwanLab，可在命令中追加 `--use_wandb`。
 ```
 
 ### 3' 测试已训练模型（可选）
@@ -224,6 +227,14 @@ CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft
 ```bash
 python eval_omni.py --weight sft_omni
 ```
+
+视频推理会均匀抽取最多 4 帧，并为每帧加入时间标记：
+
+```bash
+python eval_omni.py --weight sft_zero --mode 6 --video_dir ./dataset/videos --video_frames 4
+```
+
+mini 数据不含视频监督；若要训练视频级时序理解，还需增加相应训练数据。
 
 # 📌 模型细节
 
@@ -276,8 +287,8 @@ MiniMind-O 所说的 0.1B，指 Thinker、Talker 和两路 projector 组成的�
 | 统计口径 | minimind-3o | minimind-3o-moe |
 |---|---:|---:|
 | 可训练主体 | 113.13M | 314.89M |
-| 冻结外部模块 | 424.70M | 424.70M |
-| 运行时总加载 | 537.83M | 739.59M |
+| 冻结外部模块 | 416.45M | 416.45M |
+| 运行时总加载 | 529.58M | 731.34M |
 
 | 模块 | 具体实现 | 关键配置 | 状态 / 参数 (~3o / ~3o-moe) |
 |---|---|---|---|
@@ -286,7 +297,7 @@ MiniMind-O 所说的 0.1B，指 Thinker、Talker 和两路 projector 组成的�
 | Audio projector | `MMAudioProjector` | 512 → 768 | trainable, 0.99M |
 | Vision projector | `MMVisionProjector` | 768 → 768 | trainable, 1.18M |
 | Audio encoder | SenseVoice-Small | 16 kHz speech features | frozen, 234.00M |
-| Vision encoder | SigLIP2 base-p32-256 | 256×256 image, 64 tokens | frozen, 94.55M |
+| Vision encoder | [TIPSv2 B/14](https://huggingface.co/google/tipsv2-b14) | 448×448 image, 1024 patch tokens pooled to 64 | frozen, 86.30M |
 | Speech codec | Mimi | 8 codebooks, 12.5 Hz, 24 kHz | frozen, 96.15M |
 | Speaker condition | CAM++ embedding | 192-d speaker vector | precomputed |
 
@@ -296,7 +307,7 @@ MiniMind-O 所说的 0.1B，指 Thinker、Talker 和两路 projector 组成的�
 
 数据集下载：[ModelScope](https://www.modelscope.cn/datasets/gongjy/minimind-o_dataset) | [HuggingFace](https://huggingface.co/datasets/jingyaogong/minimind-o_dataset)
 
-所有语音数据都统一转成 Mimi codes 存储，8 层 codebook，帧率 12.5 Hz；图像统一 resize 到 256×256，由 SigLIP2 P32 编码为 64 个 patch token。训练数据主要来自公开 omni / speech instruction 数据，包括 [VoiceAssistant-400K](https://huggingface.co/datasets/gpt-omni/VoiceAssistant-400K)、[UltraChat-300K-SLAM-Omni](https://huggingface.co/datasets/worstchan/UltraChat-300K-SLAM-Omni) 等；同时基于 Qwen3-TTS 进行了大量多说话人音频合成，并用 CAM++ 提取 speaker embedding 作为音色条件。I2T 数据与 [MiniMind-V](https://github.com/jingyaogong/minimind-v) 使用的视觉指令数据来源一致，原始组成和引用可参考该项目说明。
+所有语音数据都统一转成 Mimi codes 存储，8 层 codebook，帧率 12.5 Hz；图像 resize 到 448×448，由 TIPSv2 B/14 编码为 1024 个 patch token，再自适应池化为 MiniMind 使用的 64 个视觉 token。TIPSv2 输入像素范围为 [0, 1]，不做 ImageNet 均值方差归一化。训练数据主要来自公开 omni / speech instruction 数据，包括 [VoiceAssistant-400K](https://huggingface.co/datasets/gpt-omni/VoiceAssistant-400K)、[UltraChat-300K-SLAM-Omni](https://huggingface.co/datasets/worstchan/UltraChat-300K-SLAM-Omni) 等；同时基于 Qwen3-TTS 进行了大量多说话人音频合成，并用 CAM++ 提取 speaker embedding 作为音色条件。I2T 数据与 [MiniMind-V](https://github.com/jingyaogong/minimind-v) 使用的视觉指令数据来源一致，原始组成和引用可参考该项目说明。
 
 仓库提供 **mini** 与 **full** 两套训练数据。mini 从 full 中按"英文 + 无视觉"筛出，配 `train_sft_omni.py` 的默认 `--data_path` 即可使用；它的目标是用较低成本跑通 Thinker–Talker、Mimi 编解码、序列布局和音色注入链路，而不是复现发布模型的中文语音能力。中文 Talker 要同时处理更复杂的字音映射、韵律停顿和多说话人稳定性，明显比英文更难，不能依赖单卡 3090 约 2 小时的 mini 训练完成。
 
@@ -324,7 +335,7 @@ full 数据集与发布的 `minimind-3o` / `minimind-3o-moe` 权重对应，覆�
 - `sft_a2a`：再接入语音输入，使模型从 speech instruction 进入同一套 Thinker–Talker 回复链路；
 - `sft_i2t`：最后对齐视觉路径，其中 `vision_proj` 模式只更新视觉投影层，避免图像数据过度改写语言和语音能力。
 
-训练模式里，`all` 会更新 MiniMind / Talker / projector，`audio_proj` 和 `vision_proj` 只用于单独对齐对应投影层；SenseVoice-Small、SigLIP2 和 Mimi 始终冻结。Dense 与 MoE 版本沿用同一套数据顺序。mini 命令只用于快速跑通链路，默认单卡 3090 约 2 小时完成；发布权重对应 full 数据训练。
+训练模式里，`all` 会更新 MiniMind / Talker / projector，`audio_proj` 和 `vision_proj` 只用于单独对齐对应投影层；SenseVoice-Small、TIPSv2 和 Mimi 始终冻结。Dense 与 MoE 版本沿用同一套数据顺序。mini 命令只用于快速跑通链路，默认单卡 3090 约 2 小时完成；发布权重对应 full 数据训练。
 
 下面给出 full 训练过程中的 T2A 与 A2A loss 曲线（仅供参考）：
 

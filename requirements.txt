@@ -15,6 +15,8 @@ gradio==5.49.1
 pydub==0.25.1
 numpy==1.26.4
 Pillow==9.5.0
+opencv-python==4.9.0.80
+sentencepiece==0.2.1
 swanlab==0.7.11
 modelscope==1.37.0
 # torch==2.6

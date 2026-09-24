@@ -71,6 +71,7 @@ MiniMind-O attempts to fill this gap: speech and text are connected directly at 
 - Two training datasets, `mini` and `full`. `mini` is meant for quick onboarding and runs the pipeline in ~2 hours on a single RTX 3090; `full` matches the released weights and covers Chinese speech and image tasks.
 - Multiple built-in voice prompts, unseen voice prompts and voice cloning from arbitrary reference audio, making voice-control experiments easy to reproduce.
 - A complete inference and demo toolkit: CLI, Web UI, streaming playback, barge-in interruption and a phone-mode demo.
+- Uses TIPSv2 B/14 for images; video inputs are uniformly sampled to at most 4 frames and reuse the image encoder.
 - Key modules are written from scratch in native PyTorch without high-level third-party wrappers, while remaining compatible with `transformers` tokenizers and native weight formats.
 - A companion technical report covers architecture, training curves, CER / WER evaluation, voice-cloning similarity and cross-model comparisons. See the Tech Report badge at the top.
 
@@ -91,7 +92,7 @@ MiniMind-O attempts to fill this gap: speech and text are connected directly at 
 - First release of MiniMind-O: `minimind-3o` (115M) and `minimind-3o-moe` (312M-A115M).
 - Thinker–Talker dual-path architecture. Talker uses MTP to predict multi-codebook Mimi codes and supports 24 kHz streaming speech generation and barge-in.
 - Audio codec is Mimi (8 codebooks, 12.5 Hz, 24 kHz). Talker uses a shared backbone plus lightweight adapters at the codebook interface.
-- Speech and visual features are extracted by frozen SenseVoice-Small and SigLIP2 respectively, and injected into the MiniMind hidden space through two-layer MLP projectors.
+- Speech and visual features are extracted by frozen SenseVoice-Small and TIPSv2-B/14 respectively, and injected into the MiniMind hidden space through two-layer MLP projectors.
 - Mini and full training datasets are released alongside; mini runs the full Thinker–Talker pipeline in ~2h on a single RTX 3090.
 - 5 built-in voice prompts and 7 unseen voice prompts, with voice cloning and a phone-mode WebUI included.
 
@@ -129,8 +130,8 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```bash
 # Download SenseVoice-Small audio encoder to ./model/SenseVoiceSmall
 modelscope download --model gongjy/SenseVoiceSmall --local_dir ./model/SenseVoiceSmall
-# Download SigLIP2 vision encoder to ./model/siglip2-base-p32-256-ve
-modelscope download --model gongjy/siglip2-base-p32-256-ve --local_dir ./model/siglip2-base-p32-256-ve
+# TIPSv2 downloads from Hugging Face on first use; you can also pre-download the validated revision
+HF_ENDPOINT=https://huggingface.co hf download google/tipsv2-b14 --revision ed1e4dc6b74bf3935ae099e9d5eb30fa96528454 --local-dir ./model/tipsv2-b14
 # Download Mimi audio codec to ./model/mimi
 modelscope download --model gongjy/mimi --local_dir ./model/mimi
 # Download CAM++ speaker encoder to ./model/campplus
@@ -147,7 +148,7 @@ After downloading, the directory should look like:
 minimind-o/
 ├── model/
 │   ├── SenseVoiceSmall/
-│   ├── siglip2-base-p32-256-ve/
+│   ├── tipsv2-b14/              # optional; otherwise use the Hugging Face model ID
 │   ├── mimi/
 │   ├── campplus/
 │   └── ...
@@ -206,16 +207,18 @@ If unavailable, please download the matching `.whl` from [torch_stable](https://
 
 ### 1' Download data
 
-For a quick start, downloading only the `_mini` parquet files from the [dataset link](https://huggingface.co/datasets/jingyaogong/minimind-o_dataset) and placing them under `./dataset` is enough.
+For a quick start, downloading only the `_mini` parquet files from the [dataset link](https://huggingface.co/datasets/jingyaogong/minimind-o_dataset) and placing them under `./dataset` is enough. The mini data has no image or video samples, so this small-model training pipeline reproduces speech capability; the video input path can be checked with your own clips after training.
 
 ### 2' Train
 
 The recommended mini training pipeline is shown below. It is meant to be run from the `trainer/` directory; equivalently, run `cd trainer && bash train.sh`:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_t2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 1 --from_weight llm --save_weight sft_zero --max_seq_len 512 --use_wandb --use_moe 0
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 640 --mode audio_proj --use_wandb --use_moe 0
-CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 2e-5 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 16 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 768 --use_wandb --use_moe 0
+CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_t2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 1 --from_weight llm --save_weight sft_zero --max_seq_len 512 --use_moe 0
+CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 5e-4 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 40 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 640 --mode audio_proj --use_moe 0
+CUDA_VISIBLE_DEVICES=0 torchrun --master_port 29560 --nproc_per_node 1 train_sft_omni.py --learning_rate 2e-5 --data_path ../dataset/sft_a2a_mini.parquet --epochs 1 --batch_size 16 --use_compile 0 --from_weight sft_zero --save_weight sft_zero --max_seq_len 768 --use_moe 0
+
+The defaults do not upload metrics. Append `--use_wandb` if SwanLab is configured.
 ```
 
 ### 3' Test the trained model (optional)
@@ -225,6 +228,14 @@ Make sure the model `*.pth` to be tested is placed under `./out/`.
 ```bash
 python eval_omni.py --weight sft_omni
 ```
+
+Video inference uniformly samples up to 4 frames and adds a timestamp before each frame:
+
+```bash
+python eval_omni.py --weight sft_zero --mode 6 --video_dir ./dataset/videos --video_frames 4
+```
+
+The mini data has no video supervision; training video-level temporal understanding requires additional video data.
 
 # 📌 Model Details
 
@@ -277,8 +288,8 @@ The table below counts the main module sizes per released model. Trainable count
 | Counting scope | minimind-3o | minimind-3o-moe |
 |---|---:|---:|
 | Trainable backbone | 113.13M | 314.89M |
-| Frozen external modules | 424.70M | 424.70M |
-| Total loaded at runtime | 537.83M | 739.59M |
+| Frozen external modules | 416.45M | 416.45M |
+| Total loaded at runtime | 529.58M | 731.34M |
 
 | Module | Implementation | Key configuration | Status / params (~3o / ~3o-moe) |
 |---|---|---|---|
@@ -287,7 +298,7 @@ The table below counts the main module sizes per released model. Trainable count
 | Audio projector | `MMAudioProjector` | 512 → 768 | trainable, 0.99M |
 | Vision projector | `MMVisionProjector` | 768 → 768 | trainable, 1.18M |
 | Audio encoder | SenseVoice-Small | 16 kHz speech features | frozen, 234.00M |
-| Vision encoder | SigLIP2 base-p32-256 | 256×256 image, 64 tokens | frozen, 94.55M |
+| Vision encoder | [TIPSv2 B/14](https://huggingface.co/google/tipsv2-b14) | 448×448 image, 1024 patch tokens pooled to 64 | frozen, 86.30M |
 | Speech codec | Mimi | 8 codebooks, 12.5 Hz, 24 kHz | frozen, 96.15M |
 | Speaker condition | CAM++ embedding | 192-d speaker vector | precomputed |
 
@@ -297,7 +308,7 @@ The table below counts the main module sizes per released model. Trainable count
 
 Dataset download: [ModelScope](https://www.modelscope.cn/datasets/gongjy/minimind-o_dataset) | [HuggingFace](https://huggingface.co/datasets/jingyaogong/minimind-o_dataset)
 
-All speech data is stored uniformly as Mimi codes (8 codebooks, 12.5 Hz frame rate). Images are resized uniformly to 256×256 and encoded by SigLIP2 P32 into 64 patch tokens. The training data mainly comes from public Omni / speech-instruction corpora, including [VoiceAssistant-400K](https://huggingface.co/datasets/gpt-omni/VoiceAssistant-400K), [UltraChat-300K-SLAM-Omni](https://huggingface.co/datasets/worstchan/UltraChat-300K-SLAM-Omni) and others. A large amount of multi-speaker audio is additionally synthesized with Qwen3-TTS, and CAM++ is used to extract speaker embeddings as voice conditions. The I2T data follows the same source as the visual instruction data used in [MiniMind-V](https://github.com/jingyaogong/minimind-v); please refer to that project for the original composition and citations.
+All speech data is stored uniformly as Mimi codes (8 codebooks, 12.5 Hz frame rate). Images are resized to 448×448 and encoded by TIPSv2 B/14 into 1024 patch tokens, then adaptively pooled to the 64 visual tokens used by MiniMind. TIPSv2 expects pixels in [0, 1] without ImageNet mean/std normalization. The training data mainly comes from public Omni / speech-instruction corpora, including [VoiceAssistant-400K](https://huggingface.co/datasets/gpt-omni/VoiceAssistant-400K), [UltraChat-300K-SLAM-Omni](https://huggingface.co/datasets/worstchan/UltraChat-300K-SLAM-Omni) and others. A large amount of multi-speaker audio is additionally synthesized with Qwen3-TTS, and CAM++ is used to extract speaker embeddings as voice conditions. The I2T data follows the same source as the visual instruction data used in [MiniMind-V](https://github.com/jingyaogong/minimind-v); please refer to that project for the original composition and citations.
 
 The repository ships two training sets, **mini** and **full**. The mini set is filtered from full using the "English + no-vision" criteria and works with `train_sft_omni.py` using the default `--data_path`. Its goal is to verify the Thinker–Talker pipeline, Mimi (de)coding, sequence layout and voice-injection path at low cost, rather than to reproduce the Chinese speech ability of the released models. A Chinese Talker has to handle more complex grapheme-to-phoneme mapping, prosodic pauses and multi-speaker stability, which is clearly harder than English and cannot be expected to converge within ~2 hours on a single RTX 3090.
 
@@ -325,7 +336,7 @@ The training entry point is `train_sft_omni.py`, and the recommended pipeline ca
 - `sft_a2a`: bring in speech inputs, so that the model can enter the same Thinker–Talker reply path from speech instructions;
 - `sft_i2t`: align the visual path last; the `vision_proj` mode updates only the vision projector to avoid image data overwriting language and speech abilities.
 
-Among training modes, `all` updates MiniMind / Talker / projectors, while `audio_proj` and `vision_proj` are used solely to align the corresponding projector. SenseVoice-Small, SigLIP2 and Mimi are kept frozen throughout. The Dense and MoE variants share the same data ordering. The mini commands are meant only to make the pipeline runnable end-to-end and finish in ~2 hours on a single RTX 3090 by default; the released weights correspond to full training.
+Among training modes, `all` updates MiniMind / Talker / projectors, while `audio_proj` and `vision_proj` are used solely to align the corresponding projector. SenseVoice-Small, TIPSv2 and Mimi are kept frozen throughout. The Dense and MoE variants share the same data ordering. The mini commands are meant only to make the pipeline runnable end-to-end and finish in ~2 hours on a single RTX 3090 by default; the released weights correspond to full training.
 
 T2A and A2A loss curves during full training are shown below for reference:
 

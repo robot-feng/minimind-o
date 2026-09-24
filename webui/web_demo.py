@@ -203,7 +203,7 @@ def load_main_model(model_path, model_name):
         if torch.cuda.is_available(): torch.cuda.empty_cache()
         tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         m = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
-        vision_encoder, vision_processor = MiniMindOmni.load_vision('../model/siglip2-base-p32-256-ve')
+        vision_encoder, vision_processor = MiniMindOmni.load_vision('google/tipsv2-b14')
         audio_encoder, audio_processor = MiniMindOmni.load_sensevoice('../model/SenseVoiceSmall')
         object.__setattr__(m, 'vision_encoder', vision_encoder)
         object.__setattr__(m, 'vision_processor', vision_processor)

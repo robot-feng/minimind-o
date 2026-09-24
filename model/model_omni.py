@@ -1,10 +1,20 @@
 import os, math, torch, soundfile as sf, librosa, warnings, numpy as np, onnxruntime as ort, logging, contextlib, io
+from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import List, Optional
 from torch import nn
 from torch.nn import functional as F
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
-from transformers import SiglipImageProcessor, SiglipVisionModel, logging as hf_logging
+from transformers import AutoModel, logging as hf_logging
 from .model_minimind import *
+
+TIPSV2_MODEL_ID = "google/tipsv2-b14"
+TIPSV2_MODEL_REVISION = "ed1e4dc6b74bf3935ae099e9d5eb30fa96528454"
+
+
+@dataclass
+class OmniCausalLMOutputWithPast(MoeCausalLMOutputWithPast):
+    audio_logits: Optional[List[torch.FloatTensor]] = None
 
 
 class OmniConfig(MiniMindConfig):
@@ -54,6 +64,17 @@ class MMVisionProjector(nn.Module):
         return self.mlp(x)
 
 
+def pool_patch_tokens(patch_tokens, target_tokens):
+    if patch_tokens.ndim != 3:
+        raise ValueError("patch_tokens must have shape (batch, patches, hidden)")
+    grid = math.isqrt(patch_tokens.size(1))
+    target_grid = math.isqrt(target_tokens)
+    if grid * grid == patch_tokens.size(1) and target_grid * target_grid == target_tokens:
+        spatial = patch_tokens.transpose(1, 2).reshape(patch_tokens.size(0), patch_tokens.size(2), grid, grid)
+        return F.adaptive_avg_pool2d(spatial, (target_grid, target_grid)).flatten(2).transpose(1, 2)
+    return F.adaptive_avg_pool1d(patch_tokens.transpose(1, 2), target_tokens).transpose(1, 2)
+
+
 class TalkerHead(nn.Module):
     def __init__(self, in_features, out_features, num_layers=8, rank=256):
         super().__init__()
@@ -85,6 +106,22 @@ class SenseVoiceAudioProcessor:
         return SimpleNamespace(input_features=fbank, attention_mask=(torch.arange(fbank.size(1)) < flen[0]).long().unsqueeze(0))
 
 
+class TIPSv2ImageProcessor:
+    image_size = 448
+
+    def __call__(self, images, return_tensors="pt", **kwargs):
+        from PIL import Image
+
+        images = images if isinstance(images, (list, tuple)) else [images]
+        pixels = [
+            torch.from_numpy(np.asarray(image.convert("RGB").resize(
+                (self.image_size, self.image_size), Image.Resampling.BICUBIC
+            )).copy()).permute(2, 0, 1).float().div_(255)
+            for image in images
+        ]
+        return {"pixel_values": torch.stack(pixels)}
+
+
 class TalkerModule(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -104,7 +141,7 @@ class TalkerModule(nn.Module):
 
 class MiniMindOmni(MiniMindForCausalLM):
     config_class = OmniConfig
-    def __init__(self, config: OmniConfig = None, audio_encoder_path="./model/SenseVoiceSmall", vision_model_path="./model/siglip2-base-p32-256-ve"):
+    def __init__(self, config: OmniConfig = None, audio_encoder_path="./model/SenseVoiceSmall", vision_model_path=TIPSV2_MODEL_ID):
         config = config or OmniConfig()
         super().__init__(config)
         object.__setattr__(self, 'thinker', self.model)  # alias: self.thinker == self.model
@@ -182,38 +219,56 @@ class MiniMindOmni(MiniMindForCausalLM):
     
     @staticmethod
     def load_vision(path):
-        if path is None or not os.path.exists(path):
-            warnings.warn(f"[MiniMindOmni] Vision model path not found: {path}. vision_encoder will be None!")
+        if path is None:
             return None, None
         hf_logging.set_verbosity_error()
-        try:
-            model = SiglipVisionModel.from_pretrained(path)
-        except (RuntimeError, ValueError):
-            return None, None
-        processor = SiglipImageProcessor.from_pretrained(path)
+        model_path = path
+        if not os.path.isdir(model_path):
+            from huggingface_hub import snapshot_download
+
+            endpoints = [os.environ.get("MINIMIND_HF_ENDPOINT"), "https://huggingface.co", os.environ.get("HF_ENDPOINT")]
+            endpoints = list(dict.fromkeys(endpoint for endpoint in endpoints if endpoint))
+            revision = TIPSV2_MODEL_REVISION if path == TIPSV2_MODEL_ID else "main"
+            download_error = None
+            for endpoint in endpoints:
+                try:
+                    model_path = snapshot_download(path, revision=revision, endpoint=endpoint)
+                    break
+                except Exception as error:
+                    download_error = error
+                    model_path = None
+            if model_path is None:
+                raise OSError(
+                    f"Could not download vision model {path}; check Hugging Face access and MINIMIND_HF_ENDPOINT"
+                ) from download_error
+        model = AutoModel.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+        # MiniMind needs only spatial vision features; discard TIPSv2's text tower.
+        if hasattr(model, "text_encoder"):
+            model.text_encoder = None
         for p in model.parameters():
             p.requires_grad = False
-        return model.eval(), processor
+        return model.eval(), TIPSv2ImageProcessor()
 
     @torch.compiler.disable
     def get_image_embeddings(self, image_inputs):
-        if hasattr(image_inputs, 'keys'):
-            image_inputs = {k: v.squeeze(1) if v.ndim > 2 and v.shape[1] == 1 else v for k, v in image_inputs.items()}
-            pixel_attention_mask = image_inputs.get('pixel_attention_mask')
-            if pixel_attention_mask is not None and not pixel_attention_mask.any():
-                pv = image_inputs['pixel_values']
-                return pv.new_zeros(pv.size(0), pv.size(1), self.config.image_hidden_size)
+        pixel_values = image_inputs['pixel_values']
         with torch.no_grad():
-            outputs = self.vision_encoder(**image_inputs)
-        return outputs.last_hidden_state
+            if pixel_values.ndim == 4:
+                patch_tokens = self.vision_encoder.encode_image(pixel_values).patch_tokens
+                return pool_patch_tokens(patch_tokens, self.config.image_token_len)
+            if pixel_values.ndim == 5:
+                batch, frames = pixel_values.shape[:2]
+                patch_tokens = self.vision_encoder.encode_image(pixel_values.flatten(0, 1)).patch_tokens
+                patch_tokens = pool_patch_tokens(patch_tokens, self.config.image_token_len)
+                return patch_tokens.reshape(batch, frames, self.config.image_token_len, -1)
+        raise ValueError("pixel_values must have shape (B, C, H, W) or (B, frames, C, H, W)")
 
     @torch.compiler.disable
     def encode_image_inputs(self, pixel_values):
         if pixel_values is None or self.vision_encoder is None: return None
         mask = pixel_values.flatten(1).any(1)
         if not mask.any(): return pixel_values.new_zeros(pixel_values.size(0), self.config.image_token_len, self.config.hidden_size)
-        with torch.no_grad(): emb = self.vision_encoder(pixel_values=pixel_values[mask]).last_hidden_state
-        if emb.dim() == 2: emb = emb.unsqueeze(0)
+        emb = self.get_image_embeddings({'pixel_values': pixel_values[mask]})
         emb = self.vision_proj(emb)
         if mask.all(): return emb
         idx = mask.nonzero().view(-1, 1, 1).expand_as(emb)
@@ -311,9 +366,12 @@ class MiniMindOmni(MiniMindForCausalLM):
         text_logits = self.thinker.lm_head(h_thinker[:, slice_indices, :])
         audio_logits = self.talker.lm_head(h_talker[:, slice_indices, :])
         
-        out = MoeCausalLMOutputWithPast(aux_loss=aux_loss, logits=text_logits, past_key_values=presents)
-        out.audio_logits = audio_logits
-        return out
+        return OmniCausalLMOutputWithPast(
+            aux_loss=aux_loss,
+            logits=text_logits,
+            past_key_values=presents,
+            audio_logits=audio_logits,
+        )
 
     @torch.inference_mode()
     def generate(self, input_ids, eos_token_id=2, max_new_tokens=1024, temperature=0.75, top_p=0.90,

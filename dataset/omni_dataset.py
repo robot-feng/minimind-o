@@ -251,7 +251,8 @@ class OmniDataset(Dataset):
             audio_inputs = torch.zeros(1, 1, 560)
             audio_len = 0
         if pixel_values is None and self.vision_processor:
-            pixel_values = {'pixel_values': torch.zeros(1, 3, 256, 256)}
+            image_size = getattr(self.vision_processor, 'image_size', 256)
+            pixel_values = {'pixel_values': torch.zeros(1, 3, image_size, image_size)}
         
         # 从answer_audios获取最后一个assistant的音频codes
         last_audio_codes = None

@@ -10,6 +10,7 @@ from pydub import AudioSegment
 from transformers import AutoTokenizer, AutoModelForCausalLM, MimiModel
 from model.model_omni import MiniMindOmni, OmniConfig
 from dataset.omni_dataset import OmniDataset
+from dataset.video import VIDEO_EXTENSIONS, prepare_video_inputs
 from trainer.trainer_utils import setup_seed, log_model_params
 warnings.filterwarnings('ignore')
 
@@ -26,13 +27,13 @@ def init_model(args):
                 use_moe=bool(args.use_moe)
             ),
             audio_encoder_path="./model/SenseVoiceSmall",
-            vision_model_path="./model/siglip2-base-p32-256-ve"
+            vision_model_path=args.vision_dir
         )
         model.load_state_dict(torch.load(ckp, map_location=args.device), strict=False)
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
         model.audio_encoder, model.audio_processor = MiniMindOmni.load_sensevoice("./model/SenseVoiceSmall")
-        model.vision_encoder, model.vision_processor = MiniMindOmni.load_vision("./model/siglip2-base-p32-256-ve")
+        model.vision_encoder, model.vision_processor = MiniMindOmni.load_vision(args.vision_dir)
     log_model_params(model)
     if model.audio_encoder is not None: model.audio_encoder.to(args.device)
     if model.vision_encoder is not None: model.vision_encoder.to(args.device)
@@ -102,12 +103,15 @@ def main():
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
     parser.add_argument('--audio_dir', default='./dataset/eval_omni/', type=str, help="测试音频目录")
     parser.add_argument('--image_dir', default='./dataset/eval_omni/', type=str, help="测试图像目录")
+    parser.add_argument('--video_dir', default='./dataset/eval_omni/', type=str, help="测试视频目录")
+    parser.add_argument('--video_frames', default=4, type=int, help="每个视频均匀采样的帧数")
+    parser.add_argument('--vision_dir', default='google/tipsv2-b14', type=str, help="TIPSv2视觉模型 ID 或本地路径")
     parser.add_argument('--open_thinking', default=0, type=int, help="是否开启思考模式（0=否，1=是）（思考模式下禁用audio输出）")
     parser.add_argument('--decode_audio', default=1, type=int, help="是否解码音频输出（0=否，1=是）")
-    parser.add_argument('--mode', default='0', type=str, help="评估模式：-1=all 0=text 1=multi 2=audio 3=clone 4=image 5=mix（逗号组合，如 2,5）")
+    parser.add_argument('--mode', default='0', type=str, help="评估模式：-1=all 0=text 1=multi 2=audio 3=clone 4=image 5=mix 6=video（逗号组合，如 2,5）")
     parser.add_argument('--prompt_lang', default=0, type=int, choices=[0, 1, 2], help="问题语言：0=英文 1=中文 2=英文+中文")
     args = parser.parse_args()
-    modes = set(args.mode.replace(',', '').replace('-1', '012345'))
+    modes = set(args.mode.replace(',', '').replace('-1', '0123456'))
     
     os.makedirs(args.output_dir, exist_ok=True)
     model, tokenizer = init_model(args)
@@ -238,7 +242,22 @@ def main():
                 prompt = text_hint + model.config.audio_special_token * audio_token_len + "\n\n" + model.config.image_special_token * model.config.image_token_len
                 eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, f"mix-{idx:02d}-{lang_idx}-{os.path.splitext(image_file)[0]}.mp3", pixel_values=pixel_values, audio_lens=audio_lens)
 
+    if '6' in modes:
+        print('\n\n==================== video -> {text, audio} ====================')
+        video_files = sorted(f for f in os.listdir(args.video_dir)
+                             if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS)
+        prompts = [["Describe this video."], ["请描述这个视频"], ["Describe this video.", "请描述这个视频"]][args.prompt_lang]
+        for idx, video_file in enumerate(video_files):
+            video_path = os.path.join(args.video_dir, video_file)
+            pixel_values, frame_prompt = prepare_video_inputs(
+                video_path, model.vision_processor, model.config, args.device, args.video_frames
+            )
+            for lang_idx, prompt_text in enumerate(prompts):
+                prompt = f"{prompt_text}\n\n{frame_prompt}"
+                eval_sample(model, tokenizer, args, idx, prompt, None,
+                            f"video-{idx:02d}-{lang_idx}-{os.path.splitext(video_file)[0]}.mp3",
+                            pixel_values=pixel_values)
+
 
 if __name__ == "__main__":
     main()
-

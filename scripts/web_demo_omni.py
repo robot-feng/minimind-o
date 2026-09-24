@@ -22,6 +22,7 @@ from pydub import AudioSegment
 from transformers import AutoTokenizer, AutoModelForCausalLM, MimiModel, TextStreamer
 from model.model_omni import MiniMindOmni, OmniConfig
 from dataset.omni_dataset import OmniDataset
+from dataset.video import VIDEO_EXTENSIONS, prepare_video_inputs
 from trainer.trainer_utils import setup_seed, log_model_params
 logging.getLogger().setLevel(logging.ERROR)
 with contextlib.redirect_stdout(io.StringIO()):
@@ -30,6 +31,7 @@ with contextlib.redirect_stdout(io.StringIO()):
 
 warnings.filterwarnings('ignore')
 
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
 model_lock = Lock()
 
 model, tokenizer, device, mimi_model, asr_model = None, None, None, None, None
@@ -162,9 +164,16 @@ def chat_stream(prompt, audio_input=None, image_input=None, voice_name="default"
         asr_thread.start()
 
     if image_input is not None:
-        image = Image.open(image_input).convert('RGB') if isinstance(image_input, str) else image_input.convert('RGB')
-        pixel_values = {k: v.to(device) for k, v in model.vision_processor(images=image, return_tensors="pt").items()}
-        prompt = (prompt + "\n\n" if prompt else "") + model.config.image_special_token * model.config.image_token_len
+        extension = os.path.splitext(image_input)[1].lower() if isinstance(image_input, str) else ""
+        if extension in VIDEO_EXTENSIONS:
+            pixel_values, frame_prompt = prepare_video_inputs(
+                image_input, model.vision_processor, model.config, device
+            )
+            prompt = (prompt + "\n\n" if prompt else "") + frame_prompt
+        else:
+            image = Image.open(image_input).convert('RGB') if isinstance(image_input, str) else image_input.convert('RGB')
+            pixel_values = {k: v.to(device) for k, v in model.vision_processor(images=image, return_tensors="pt").items()}
+            prompt = (prompt + "\n\n" if prompt else "") + model.config.image_special_token * model.config.image_token_len
 
     if voice_name != "default" and voice_name in voices_data:
         v = voices_data[voice_name]
@@ -217,10 +226,15 @@ def launch_gradio(server_name="0.0.0.0", server_port=8888):
     def respond(message, audio, voice, chat_history, model_history, max_turns):
         text = message.get("text", "") if isinstance(message, dict) else (message or "")
         files = message.get("files", []) if isinstance(message, dict) else []
-        img_path = next((f for f in files if any(f.lower().endswith(e) for e in ('.png','.jpg','.jpeg','.gif','.bmp','.webp'))), None)
+        visual_path = next(
+            (f for f in files if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS | IMAGE_EXTENSIONS),
+            None,
+        )
+        is_video = visual_path is not None and os.path.splitext(visual_path)[1].lower() in VIDEO_EXTENSIONS
+        question = text or ("请描述这个视频" if is_video else "请描述这张图片")
 
-        if not text and audio is None and img_path is None:
-            yield chat_history + [{"role": "assistant", "content": "请输入文本、上传图片或录制音频"}], gr.update(), gr.update(), model_history, ""
+        if not text and audio is None and visual_path is None:
+            yield chat_history + [{"role": "assistant", "content": "请输入文本、上传图片或视频，或录制音频"}], gr.update(), gr.update(), model_history, ""
             return
 
         if audio is not None:
@@ -229,8 +243,8 @@ def launch_gradio(server_name="0.0.0.0", server_port=8888):
             wav_path = tempfile.NamedTemporaryFile(suffix='.wav', delete=False).name
             sf.write(wav_path, display_samples, sr)
             chat_history = chat_history + [{"role": "user", "content": {"path": wav_path}}]
-        elif img_path:
-            chat_history = chat_history + [{"role": "user", "content": {"path": img_path}}, {"role": "user", "content": text or "请描述这张图片"}]
+        elif visual_path:
+            chat_history = chat_history + [{"role": "user", "content": {"path": visual_path}}, {"role": "user", "content": question}]
         else:
             chat_history = chat_history + [{"role": "user", "content": text}]
 
@@ -242,7 +256,7 @@ def launch_gradio(server_name="0.0.0.0", server_port=8888):
 
         hist = model_history[-(max_turns * 2):] if max_turns > 0 else []
         for text_chunk, audio_data, asr in chat_stream(
-            text or "", audio_input=audio, image_input=img_path,
+            question, audio_input=audio, image_input=visual_path,
             voice_name=voice, history=hist, temperature=0.7, max_tokens=512
         ):
             if text_chunk:
@@ -256,7 +270,7 @@ def launch_gradio(server_name="0.0.0.0", server_port=8888):
             if asr is not None:
                 asr_text = asr
 
-        user_text = asr_text if asr_text else (text or "")
+        user_text = asr_text if asr_text else (question if visual_path else (text or ""))
         if user_text:
             model_history = model_history + [{"role": "user", "content": user_text}]
         if response_text:
@@ -265,7 +279,7 @@ def launch_gradio(server_name="0.0.0.0", server_port=8888):
         yield chat_history, final_audio if final_audio else gr.update(), None, model_history, ""
 
     with gr.Blocks(title="MiniMind-O", js="()=>{new MutationObserver(()=>{const m=document.getElementById('mic-box');if(!m)return;const h=!!m.querySelector('audio');document.body.classList.toggle('has-audio',h);const t=document.querySelector('textarea');if(t){t.placeholder=h?'已加载语音，点击发送':'输入文本';t.disabled=h}}).observe(document.body,{childList:true,subtree:true})}", css=".app{padding-top:6px!important} #component-0{gap:6px!important} #component-1{padding:2px 0!important;margin:0!important;min-height:0!important;border:none!important} #component-1 .padding{padding:0!important} #chatbox img{max-width:120px!important;max-height:120px!important;border-radius:8px} textarea{overflow-y:hidden!important;height:auto!important;min-height:30px!important;max-height:60px!important} #mic-box{max-height:150px!important;overflow:hidden!important} #mic-box .wrap span.or,#mic-box .wrap span:first-child{display:none!important} #mic-box .wrap{font-size:0!important;min-height:40px!important;padding:8px!important} #mic-box .wrap::after{content:'上传/录音';font-size:14px!important} #mic-box .mic-select{display:none!important} .has-audio textarea{opacity:0.4!important;pointer-events:none!important} .has-audio .upload-button,.has-audio [data-testid='upload-button']{display:none!important} @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}") as demo:
-        gr.HTML('<div style="text-align:center;margin:2px 0"><span style="font-size:1.2rem;font-weight:bold;font-style:italic">MiniMind-O</span> <span style="color:#999;font-size:0.8rem">text / image / audio → text + audio</span></div>')
+        gr.HTML('<div style="text-align:center;margin:2px 0"><span style="font-size:1.2rem;font-weight:bold;font-style:italic">MiniMind-O</span> <span style="color:#999;font-size:0.8rem">text / image / video / audio → text + audio</span></div>')
 
         chatbot = gr.Chatbot(label="", height=380, elem_id="chatbox", type="messages")
         model_history = gr.State([])
@@ -275,7 +289,7 @@ def launch_gradio(server_name="0.0.0.0", server_port=8888):
             with gr.Column(scale=0, min_width=160):
                 aud = gr.Audio(sources=["upload", "microphone"], type="numpy", show_label=False, elem_id="mic-box")
             with gr.Column(scale=4):
-                msg = gr.MultimodalTextbox(placeholder="输入文本", show_label=False, submit_btn="发送")
+                msg = gr.MultimodalTextbox(placeholder="输入文本，或上传图片/视频", show_label=False, submit_btn="发送")
         with gr.Row():
             voice_dd = gr.Dropdown(choices=voice_choices, value="default", label="音色选择", scale=0, min_width=140)
             turns_dd = gr.Dropdown(choices=[0, 2, 4, 6, 8], value=0, label="多轮记忆", scale=0, min_width=120)
@@ -293,7 +307,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="MiniMind-O Gradio Demo")
     parser.add_argument('--load_from', default='./', type=str, help="transformers模型扫描目录")
     parser.add_argument('--audio_encoder', default='../model/SenseVoiceSmall', type=str)
-    parser.add_argument('--vision_model', default='../model/siglip2-base-p32-256-ve', type=str)
+    parser.add_argument('--vision_model', default='google/tipsv2-b14', type=str)
     parser.add_argument('--mimi_path', default='../model/mimi', type=str)
     parser.add_argument('--device', default=default_device(), type=str)
     parser.add_argument('--asr_device', default='auto', type=str, help='ASR设备；auto 在 MPS 主设备下使用 cpu，其它情况跟随 --device')

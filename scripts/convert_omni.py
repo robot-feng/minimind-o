@@ -16,7 +16,7 @@ warnings.filterwarnings('ignore', category=UserWarning)
 def convert_torch2transformers(torch_path, transformers_path, lm_config, dtype=torch.bfloat16):
     OmniConfig.register_for_auto_class()
     MiniMindOmni.register_for_auto_class("AutoModelForCausalLM")
-    model = MiniMindOmni(lm_config, audio_encoder_path="../model/SenseVoiceSmall", vision_model_path="../model/siglip2-base-p32-256-ve")
+    model = MiniMindOmni(lm_config, audio_encoder_path="../model/SenseVoiceSmall", vision_model_path="google/tipsv2-b14")
     state_dict = torch.load(torch_path, map_location='cpu')
     model.load_state_dict(state_dict, strict=False)
     model = model.to(dtype)

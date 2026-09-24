@@ -63,7 +63,7 @@ def log_model_params(model, ignore_patterns=['audio_encoder', 'vision_encoder'])
     else: Logger(f'Model Params: {total:.2f}M')
 
 
-def init_omni_model(omni_config, from_weight='full_sft', tokenizer_path='../model', audio_encoder_path='../model/SenseVoiceSmall', vision_model_path='../model/siglip2-base-p32-256-ve', save_dir='../out', device='cuda', freeze_backbone='none', from_resume=0):
+def init_omni_model(omni_config, from_weight='full_sft', tokenizer_path='../model', audio_encoder_path='../model/SenseVoiceSmall', vision_model_path='google/tipsv2-b14', save_dir='../out', device='cuda', freeze_backbone='none', from_resume=0):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = MiniMindOmni(omni_config, audio_encoder_path=audio_encoder_path, vision_model_path=vision_model_path)
     
@@ -198,4 +198,3 @@ class SkipBatchSampler(Sampler):
     def __len__(self):
         total_batches = (len(self.sampler) + self.batch_size - 1) // self.batch_size
         return max(0, total_batches - self.skip_batches)
-

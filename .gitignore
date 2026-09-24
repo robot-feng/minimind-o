@@ -5,4 +5,13 @@ __pycache__/
 .cursor/
 .claude/
 .specstory/
+.cache/
+out/
+checkpoints/
+dataset/*.parquet
+model/SenseVoiceSmall/
+model/siglip2-base-p32-256-ve/
+model/tipsv2-b14/
+model/mimi/
+model/campplus/
 .env
