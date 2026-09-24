@@ -20,7 +20,7 @@ from trainer.trainer_utils import (
     Logger, SkipBatchSampler, get_epoch_sampler, get_lr, init_distributed_mode, init_omni_model,
     is_main_process, log_model_params, omni_checkpoint, setup_seed,
 )
-from trainer.training_losses import causal_lm_loss, masked_distillation_loss
+from trainer.training_losses import causal_lm_loss, distillation_objective, masked_distillation_loss
 
 warnings.filterwarnings("ignore")
 
@@ -62,10 +62,10 @@ def _train_epoch(task, epoch, loader, total_steps, start_step, model, teacher,
                 kd_loss = masked_distillation_loss(
                     output.logits, teacher_logits, labels, temperature=args.temperature
                 )
-                objective = args.alpha * ce_loss + (1 - args.alpha) * kd_loss
+                objective = distillation_objective(ce_loss, kd_loss, aux_loss, args.alpha)
             else:
-                objective = ce_loss
-            objective = (objective + aux_loss) / args.accumulation_steps
+                objective = ce_loss + aux_loss
+            objective = objective / args.accumulation_steps
 
         scaler.scale(objective).backward()
         final_batch = step == total_steps

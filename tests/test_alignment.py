@@ -16,7 +16,7 @@ from trainer.alignment_utils import dpo_loss, masked_sequence_logps, token_log_p
 from trainer.agent_tools import calculate_agent_reward, execute_tool, parse_tool_calls, safe_math_eval
 from trainer.rl_utils import grpo_cispo_loss, group_relative_advantages, score_responses
 from trainer.rollout_engine import RolloutResult, SGLangRolloutEngine, TorchRolloutEngine
-from trainer.training_losses import causal_lm_loss, masked_distillation_loss
+from trainer.training_losses import causal_lm_loss, distillation_objective, masked_distillation_loss
 from trainer.ppo_utils import clipped_value_loss, generalized_advantage_estimate, ppo_policy_loss
 from trainer.train_ppo import PPOValueModel, _trainable_value, train_batch
 from trainer.train_agent import collect_agent_rollouts
@@ -402,6 +402,15 @@ class TestLoRA(unittest.TestCase):
 
 
 class TestTextTrainingLosses(unittest.TestCase):
+    def test_distillation_scales_moe_aux_loss_with_ce_weight(self):
+        ce, kd, aux = torch.tensor(2.0), torch.tensor(4.0), torch.tensor(0.5)
+        loss = distillation_objective(ce, kd, aux, alpha=0.25)
+        torch.testing.assert_close(loss, torch.tensor(3.625))
+
+    def test_distillation_objective_validates_alpha(self):
+        with self.assertRaises(ValueError):
+            distillation_objective(torch.tensor(1.0), torch.tensor(2.0), torch.tensor(0.0), 1.1)
+
     def test_causal_lm_loss_ignores_masked_targets(self):
         logits = torch.zeros(1, 3, 5)
         labels = torch.tensor([[0, 1, -100]])

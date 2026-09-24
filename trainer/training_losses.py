@@ -26,3 +26,9 @@ def masked_distillation_loss(student_logits, teacher_logits, labels, temperature
     per_token = F.kl_div(F.log_softmax(student, dim=-1), F.softmax(teacher, dim=-1),
                          reduction="none").sum(dim=-1)
     return (per_token * mask).sum() / mask.sum() * temperature**2
+
+
+def distillation_objective(ce_loss, kd_loss, aux_loss, alpha):
+    if not 0 <= alpha <= 1:
+        raise ValueError("alpha must be in [0, 1]")
+    return alpha * (ce_loss + aux_loss) + (1 - alpha) * kd_loss
