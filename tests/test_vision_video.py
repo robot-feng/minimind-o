@@ -13,6 +13,7 @@ from PIL import Image
 from dataset.video import prepare_video_inputs, sample_video_frames
 from model.model_omni import (
     MiniMindOmni,
+    OmniConfig,
     OmniCausalLMOutputWithPast,
     TIPSV2_MODEL_ID,
     TIPSv2ImageProcessor,
@@ -195,6 +196,40 @@ class TestTIPSv2Checkpoint(unittest.TestCase):
         video = pixels.unsqueeze(1).expand(-1, 3, -1, -1, -1).contiguous()
         features = model.get_image_embeddings({"pixel_values": video})
         self.assertEqual(tuple(features.shape), (1, 3, 64, 768))
+
+    def test_real_checkpoint_reaches_thinker_for_image_and_video_inputs(self):
+        config = OmniConfig(
+            hidden_size=32, num_hidden_layers=2, vocab_size=64,
+            num_attention_heads=4, num_key_value_heads=2, intermediate_size=64,
+            talker_hidden_size=32, num_talker_hidden_layers=1,
+            image_hidden_size=768, image_token_len=64,
+            max_position_embeddings=256,
+        )
+        model = MiniMindOmni(config, audio_encoder_path=None, vision_model_path=None).eval()
+        object.__setattr__(model, "vision_encoder", self.encoder)
+        image = Image.new("RGB", (80, 52), (50, 140, 210))
+        pixels = self.processor(images=image)["pixel_values"]
+        image_ids = torch.tensor([[1] + [config.image_ids[0]] * config.image_token_len + [2]])
+        video = pixels.unsqueeze(1).expand(-1, 3, -1, -1, -1).contiguous()
+        video_ids = torch.tensor(
+            [[1] + ([config.image_ids[0]] * config.image_token_len + [3]) * 2
+             + [config.image_ids[0]] * config.image_token_len]
+        )
+
+        for input_ids, pixel_values in (
+            (image_ids, {"pixel_values": pixels}),
+            (video_ids, {"pixel_values": video}),
+        ):
+            with torch.inference_mode():
+                output = model(input_ids, pixel_values=pixel_values, text_only=True)
+                generated = list(model.generate(
+                    input_ids, eos_token_id=2, max_new_tokens=1,
+                    temperature=0.8, top_p=1.0, stream=True,
+                    pixel_values=pixel_values,
+                ))
+            self.assertEqual(output.logits.shape[:2], input_ids.shape)
+            self.assertEqual(len(generated), 1)
+            self.assertEqual(tuple(generated[0][0].shape), (1, 1))
 
 
 if __name__ == "__main__":
