@@ -4,13 +4,12 @@ import random
 import time
 import warnings
 import torch
-import soundfile as sf
 from PIL import Image
-from pydub import AudioSegment
 from transformers import AutoTokenizer, AutoModelForCausalLM, MimiModel
 from model.model_omni import MiniMindOmni, OmniConfig
 from dataset.omni_dataset import OmniDataset
 from dataset.video import VIDEO_EXTENSIONS, prepare_video_inputs
+from trainer.audio_output import save_generated_audio
 from trainer.trainer_utils import setup_seed, log_model_params
 warnings.filterwarnings('ignore')
 
@@ -77,11 +76,13 @@ def eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, output_name, 
                     filtered = torch.where(mimi_codes >= 2049, torch.zeros_like(mimi_codes), mimi_codes)
                     audio = model.mimi_model.decode(filtered).audio_values
                     output_path = os.path.join(args.output_dir, output_name)
-                    wav_path = output_path.rsplit('.', 1)[0] + '.wav'
-                    sf.write(wav_path, audio.squeeze().float().cpu().numpy(), 24000)
-                    AudioSegment.from_wav(wav_path).export(output_path, format='mp3', bitrate='64k')
-                    os.remove(wav_path)
-                    print(f'| Audio decoded to: {output_path}')
+                    saved_path, error = save_generated_audio(
+                        audio.squeeze().float().cpu().numpy(), output_path
+                    )
+                    if error:
+                        print(f'| MP3 export failed ({error}); WAV saved to: {saved_path}')
+                    else:
+                        print(f'| Audio decoded to: {saved_path}')
                 except Exception as e:
                     print(f'⚠️  保存音频失败: {str(e)}')
             else:

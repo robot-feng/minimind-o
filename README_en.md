@@ -229,6 +229,8 @@ Make sure the model `*.pth` to be tested is placed under `./out/`.
 python eval_omni.py --weight sft_omni
 ```
 
+Generated speech is exported as MP3 by default. If FFmpeg is unavailable, evaluation keeps the decoded WAV and prints its path.
+
 Video inference uniformly samples up to 4 frames and adds a timestamp before each frame:
 
 ```bash

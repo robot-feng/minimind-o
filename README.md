@@ -228,6 +228,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 tra
 python eval_omni.py --weight sft_omni
 ```
 
+语音默认导出 MP3；如果系统未安装 FFmpeg，评估仍会保留解码后的 WAV 并打印保存路径。
+
 视频推理会均匀抽取最多 4 帧，并为每帧加入时间标记：
 
 ```bash
