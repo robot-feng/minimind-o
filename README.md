@@ -131,8 +131,8 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```bash
 # 下载 SenseVoice-Small 语音编码器到 ./model/SenseVoiceSmall
 modelscope download --model gongjy/SenseVoiceSmall --local_dir ./model/SenseVoiceSmall
-# TIPSv2 首次运行时会从 Hugging Face 自动下载；也可预先下载已验证版本到本地
-HF_ENDPOINT=https://huggingface.co hf download google/tipsv2-b14 --revision ed1e4dc6b74bf3935ae099e9d5eb30fa96528454 --local-dir ./model/tipsv2-b14
+# TIPSv2 首次运行时会从 Hugging Face 自动下载；也可预先下载到本地
+HF_ENDPOINT=https://huggingface.co hf download google/tipsv2-b14 --local-dir ./model/tipsv2-b14
 # 下载 Mimi 音频编解码器到 ./model/mimi
 modelscope download --model gongjy/mimi --local_dir ./model/mimi
 # 下载 CAMPPlus 说话人编码器到 ./model/campplus

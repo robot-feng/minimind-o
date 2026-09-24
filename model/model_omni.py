@@ -9,7 +9,6 @@ from transformers import AutoModel, logging as hf_logging
 from .model_minimind import *
 
 TIPSV2_MODEL_ID = "google/tipsv2-b14"
-TIPSV2_MODEL_REVISION = "ed1e4dc6b74bf3935ae099e9d5eb30fa96528454"
 
 
 @dataclass
@@ -228,11 +227,10 @@ class MiniMindOmni(MiniMindForCausalLM):
 
             endpoints = [os.environ.get("MINIMIND_HF_ENDPOINT"), "https://huggingface.co", os.environ.get("HF_ENDPOINT")]
             endpoints = list(dict.fromkeys(endpoint for endpoint in endpoints if endpoint))
-            revision = TIPSV2_MODEL_REVISION if path == TIPSV2_MODEL_ID else "main"
             download_error = None
             for endpoint in endpoints:
                 try:
-                    model_path = snapshot_download(path, revision=revision, endpoint=endpoint)
+                    model_path = snapshot_download(path, endpoint=endpoint)
                     break
                 except Exception as error:
                     download_error = error

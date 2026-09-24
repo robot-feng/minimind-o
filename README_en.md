@@ -130,8 +130,8 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```bash
 # Download SenseVoice-Small audio encoder to ./model/SenseVoiceSmall
 modelscope download --model gongjy/SenseVoiceSmall --local_dir ./model/SenseVoiceSmall
-# TIPSv2 downloads from Hugging Face on first use; you can also pre-download the validated revision
-HF_ENDPOINT=https://huggingface.co hf download google/tipsv2-b14 --revision ed1e4dc6b74bf3935ae099e9d5eb30fa96528454 --local-dir ./model/tipsv2-b14
+# TIPSv2 downloads from Hugging Face on first use; you can also pre-download it locally
+HF_ENDPOINT=https://huggingface.co hf download google/tipsv2-b14 --local-dir ./model/tipsv2-b14
 # Download Mimi audio codec to ./model/mimi
 modelscope download --model gongjy/mimi --local_dir ./model/mimi
 # Download CAM++ speaker encoder to ./model/campplus

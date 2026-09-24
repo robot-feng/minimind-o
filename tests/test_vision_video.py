@@ -14,6 +14,7 @@ from dataset.video import prepare_video_inputs, sample_video_frames
 from model.model_omni import (
     MiniMindOmni,
     OmniCausalLMOutputWithPast,
+    TIPSV2_MODEL_ID,
     TIPSv2ImageProcessor,
     pool_patch_tokens,
 )
@@ -90,6 +91,21 @@ class TestTIPSv2ImageProcessing(unittest.TestCase):
         output = OmniCausalLMOutputWithPast(logits=logits, audio_logits=audio_logits)
         self.assertIs(output.logits, logits)
         self.assertIs(output.audio_logits, audio_logits)
+
+    def test_model_id_uses_huggingface_default_revision(self):
+        encoder = nn.Module()
+        encoder.text_encoder = nn.Linear(2, 2)
+        with patch.dict(os.environ, {
+            "MINIMIND_HF_ENDPOINT": "https://huggingface.co",
+            "HF_ENDPOINT": "https://huggingface.co",
+        }), patch("huggingface_hub.snapshot_download", return_value="/cached/tips") as download, \
+                patch("model.model_omni.AutoModel.from_pretrained", return_value=encoder) as load:
+            loaded, processor = MiniMindOmni.load_vision(TIPSV2_MODEL_ID)
+
+        download.assert_called_once_with(TIPSV2_MODEL_ID, endpoint="https://huggingface.co")
+        load.assert_called_once_with("/cached/tips", trust_remote_code=True, local_files_only=True)
+        self.assertIsNone(loaded.text_encoder)
+        self.assertIsInstance(processor, TIPSv2ImageProcessor)
 
 
 class TestVideoInput(unittest.TestCase):
