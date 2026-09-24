@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -312,13 +313,14 @@ class TestPPOLosses(unittest.TestCase):
                     attention_mask.sum(dim=1), mask,
                 )
 
-        def make_args(early_stop_kl):
+        def make_args(early_stop_kl, debug=False):
             return SimpleNamespace(
                 device="cpu", max_seq_len=8, max_gen_len=2, reward_model=None,
                 gamma=0.99, gae_lambda=0.95, ppo_epochs=2, mini_batch_size=1,
                 accumulation_steps=2, clip_epsilon=0.2, value_clip=0.2,
                 value_coef=0.5, beta=0.02, early_stop_kl=early_stop_kl,
-                grad_clip=1.0,
+                grad_clip=1.0, debug_mode=debug, debug_interval=1,
+                debug_log_ratio=debug,
             )
 
         model, critic = Policy(), Critic()
@@ -327,10 +329,16 @@ class TestPPOLosses(unittest.TestCase):
         actor_optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
         critic_optimizer = torch.optim.AdamW(critic.parameters(), lr=0.01)
         scaler = torch.amp.GradScaler("cuda", enabled=False)
-        metrics, _ = train_batch(
-            model, critic, reference, actor_optimizer, critic_optimizer, scaler,
-            nullcontext(), make_args(1000), Tokenizer(), Rollout(-2.0), ["p1", "p2"],
-        )
+        with patch("trainer.train_ppo.Logger") as logger:
+            metrics, _ = train_batch(
+                model, critic, reference, actor_optimizer, critic_optimizer, scaler,
+                nullcontext(), make_args(1000, debug=True), Tokenizer(), Rollout(-2.0),
+                ["p1", "p2"], 1,
+            )
+        debug_output = "\n".join(str(call.args[0]) for call in logger.call_args_list)
+        self.assertIn("CONTEXT_BEGIN", debug_output)
+        self.assertIn("reward=", debug_output)
+        self.assertIn("log_ratio max_abs=", debug_output)
         self.assertTrue(torch.isfinite(torch.tensor(metrics["policy_loss"])))
         self.assertEqual(int(actor_optimizer.state[model.embed.weight]["step"]), 2)
         self.assertEqual(int(critic_optimizer.state[critic.embed.weight]["step"]), 2)
@@ -341,7 +349,7 @@ class TestPPOLosses(unittest.TestCase):
         train_batch(
             stopped_model, stopped_critic, reference, stopped_actor_optimizer,
             stopped_critic_optimizer, scaler, nullcontext(), make_args(0.01),
-            Tokenizer(), Rollout(-20.0), ["p1", "p2"],
+            Tokenizer(), Rollout(-20.0), ["p1", "p2"], 1,
         )
         self.assertEqual(len(stopped_actor_optimizer.state), 0)
         self.assertEqual(len(stopped_critic_optimizer.state), 0)

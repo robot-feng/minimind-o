@@ -17,6 +17,11 @@ ENTRYPOINTS = (
     "train_sft_omni.py",
     "train_tokenizer.py",
 )
+EXPECTED_OPTIONS = {
+    "train_ppo.py": ("--debug_mode", "--debug_interval", "--debug_log_ratio"),
+    "train_grpo.py": ("--debug_mode", "--debug_interval"),
+    "train_agent.py": ("--debug_mode", "--debug_interval"),
+}
 
 
 class TestTrainerCLI(unittest.TestCase):
@@ -33,6 +38,8 @@ class TestTrainerCLI(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("usage:", result.stdout.lower())
+                for option in EXPECTED_OPTIONS.get(entrypoint, ()):
+                    self.assertIn(option, result.stdout)
 
 
 if __name__ == "__main__":

@@ -385,6 +385,8 @@ RL 入口默认使用 PyTorch 原生 rollout。`train_grpo.py`、`train_ppo.py` 
 
 单卡和 DDP 训练都会按 epoch 确定性打乱数据，恢复训练时会沿用对应 epoch 的顺序；可用 `--seed` 控制随机种子、`--device` 指定单卡设备，`--use_compile 1` 启用 `torch.compile`。PPO 支持 minibatch、多轮 PPO 更新、梯度累积和 KL 早停；例如 `--mini_batch_size 2 --ppo_update_iters 2 --accumulation_steps 1 --early_stop_kl 0.25`。原版参数名 `--lam`、`--vf_coef`、`--kl_coef`、`--cliprange_value` 也保留为别名。
 
+PPO、GRPO 和 Agent RL 可用 `--debug_mode --debug_interval 20` 定期查看采样轨迹与奖励；PPO 另可加 `--debug_log_ratio` 检查首次更新时新旧策略的 log-prob 差异。
+
 ### 4' 文本偏好对齐（DPO）
 
 `trainer/train_dpo_omni.py` 使用 MiniMind-O 权重和 checkpoint，读取 MiniMind 格式的 `dpo.jsonl`（每条样本包含 `chosen`、`rejected` 两组对话）。当前 DPO 入口训练文本主干与词表头；音频、图像分支保持冻结，多模态监督仍走 `train_sft_omni.py`。

@@ -386,6 +386,8 @@ RL entry points use native PyTorch rollout by default. `train_grpo.py`, `train_p
 
 Single-GPU and DDP runs deterministically shuffle data each epoch and preserve that epoch order on resume. Use `--seed` to select the random seed, `--device` to select a single-device target, and `--use_compile 1` to enable `torch.compile`. PPO supports minibatches, repeated PPO updates, gradient accumulation and KL early stopping; for example: `--mini_batch_size 2 --ppo_update_iters 2 --accumulation_steps 1 --early_stop_kl 0.25`. The original option names `--lam`, `--vf_coef`, `--kl_coef` and `--cliprange_value` remain available as aliases.
 
+PPO, GRPO and Agent RL support `--debug_mode --debug_interval 20` to periodically inspect sampled trajectories and rewards. PPO also accepts `--debug_log_ratio` to inspect the old/new policy log-probability difference on the first update.
+
 ### Text preference alignment (DPO)
 
 `trainer/train_dpo_omni.py` uses MiniMind-O weights and checkpoints, and reads MiniMind-style `dpo.jsonl` rows containing `chosen` and `rejected` message lists. This entry point updates the text backbone and vocabulary head while keeping the audio and vision paths frozen; multimodal supervision remains in `train_sft_omni.py`.

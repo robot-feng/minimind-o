@@ -15,7 +15,10 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from dataset.text_dataset import RLAIFPromptDataset
 from model.model_omni import OmniConfig
-from trainer.rl_utils import RewardModel, group_relative_advantages, score_responses, grpo_cispo_loss
+from trainer.rl_utils import (
+    RewardModel, format_rollout_debug, group_relative_advantages, grpo_cispo_loss,
+    score_responses,
+)
 from trainer.rollout_engine import create_rollout_engine, unwrap_model
 from trainer.trainer_utils import (
     Logger, SkipBatchSampler, get_epoch_sampler, get_lr, init_distributed_mode, init_omni_model,
@@ -60,6 +63,9 @@ def train_epoch(epoch, loader, total_steps, start_step, model, reference,
         full_mask = torch.cat((encoded.attention_mask.repeat_interleave(args.num_generations, dim=0),
                                completion_mask), dim=1)
         rewards = score_responses(prompts, result.completions, reward_model).to(args.device)
+        if args.debug_mode and is_main_process() and step % args.debug_interval == 0:
+            Logger(format_rollout_debug(step, prompts, result.completions, rewards,
+                                        args.num_generations))
         advantages = group_relative_advantages(rewards, args.num_generations)
         n_keep = result.completion_ids.size(1)
 
@@ -144,12 +150,14 @@ def main():
     parser.add_argument("--use_compile", type=int, choices=(0, 1), default=0)
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", default="MiniMind-O-GRPO")
+    parser.add_argument("--debug_mode", action="store_true")
+    parser.add_argument("--debug_interval", type=int, default=20)
     parser.add_argument("--rollout_engine", choices=("torch", "sglang"), default="torch")
     parser.add_argument("--sglang_base_url", default="http://localhost:8998")
     parser.add_argument("--sglang_shared_path", default="../out/sglang_grpo")
     args = parser.parse_args()
-    if args.num_generations < 2 or args.accumulation_steps < 1:
-        parser.error("num_generations must be >= 2 and accumulation_steps must be positive")
+    if args.num_generations < 2 or args.accumulation_steps < 1 or args.debug_interval < 1:
+        parser.error("num_generations must be >= 2; accumulation_steps and debug_interval must be positive")
 
     local_rank = init_distributed_mode()
     args.device = (f"cuda:{local_rank}" if dist.is_initialized()

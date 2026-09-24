@@ -103,3 +103,57 @@ def score_responses(prompts, responses, reward_model=None):
               (reward_model.score(prompts[i], response) if reward_model else 0.0)
               for i, prompt in enumerate(prompts) for response in responses[i * repeats:(i + 1) * repeats]]
     return torch.tensor(scores, dtype=torch.float32)
+
+
+def _reward_values(rewards):
+    return rewards.detach().float().cpu().tolist() if isinstance(rewards, torch.Tensor) else list(rewards)
+
+
+def format_rollout_debug(step, prompts, completions, rewards, num_generations):
+    """Format sampled prompt, completion, and reward diagnostics for RL training."""
+    reward_values = _reward_values(rewards)
+    expected = len(prompts) * num_generations
+    if num_generations < 1 or len(completions) != expected or len(reward_values) != expected:
+        raise ValueError("completions and rewards must match prompts * num_generations")
+    lines = []
+    for prompt_index, prompt in enumerate(prompts):
+        lines.extend((f"[DEBUG] step={step}, sample[{prompt_index}]", "=" * 100,
+                      f"{'=' * 30} CONTEXT_BEGIN {'=' * 30}", str(prompt),
+                      f"{'=' * 31} CONTEXT_END {'=' * 31}"))
+        start = prompt_index * num_generations
+        for generation in range(num_generations):
+            index = start + generation
+            lines.extend((f"{'=' * 28} gen[{generation}] RESPONSE_BEGIN {'=' * 28}",
+                          str(completions[index]),
+                          f"{'=' * 29} gen[{generation}] RESPONSE_END {'=' * 29}",
+                          f"[DEBUG] gen[{generation}] reward={reward_values[index]:.4f}"))
+        lines.append("=" * 100)
+    return "\n".join(lines)
+
+
+def format_agent_rollout_debug(step, episodes, rewards, num_generations):
+    """Format multi-turn agent trajectories grouped by source prompt."""
+    reward_values = _reward_values(rewards)
+    if (num_generations < 1 or len(episodes) != len(reward_values)
+            or len(episodes) % num_generations):
+        raise ValueError("episodes and rewards must form complete generation groups")
+    lines = []
+    for prompt_index in range(len(episodes) // num_generations):
+        lines.extend((f"[DEBUG] step={step}, sample[{prompt_index}]", "=" * 100))
+        start = prompt_index * num_generations
+        for generation, index in enumerate(range(start, start + num_generations)):
+            episode = episodes[index]
+            tools = ", ".join(tool.get("name", "") for tool in episode["tools"])
+            lines.extend((f"[DEBUG] gen[{generation}] tools={tools or '(none)'}",
+                          f"{'=' * 28} CONTEXT_BEGIN {'=' * 28}",
+                          str(episode["prompt"]),
+                          f"{'=' * 29} CONTEXT_END {'=' * 29}"))
+            for turn, response in enumerate(episode["turns"]):
+                lines.extend((f"{'=' * 28} turn[{turn}] RESPONSE_BEGIN {'=' * 28}",
+                              str(response),
+                              f"{'=' * 29} turn[{turn}] RESPONSE_END {'=' * 29}"))
+            lines.append(
+                f"[DEBUG] reward={reward_values[index]:.4f}, unfinished={episode['unfinished']}"
+            )
+        lines.append("=" * 100)
+    return "\n".join(lines)

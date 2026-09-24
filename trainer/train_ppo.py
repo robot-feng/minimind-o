@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from dataset.text_dataset import RLAIFPromptDataset
 from model.model_omni import OmniConfig
 from trainer.ppo_utils import clipped_value_loss, generalized_advantage_estimate, ppo_policy_loss
-from trainer.rl_utils import RewardModel, score_responses
+from trainer.rl_utils import RewardModel, format_rollout_debug, score_responses
 from trainer.rollout_engine import create_rollout_engine, unwrap_model
 from trainer.trainer_utils import (
     Logger, SkipBatchSampler, get_epoch_sampler, get_lr, init_distributed_mode, init_omni_model,
@@ -50,7 +50,7 @@ def _policy_logps(model, input_ids, n_keep, attention_mask):
 
 
 def train_batch(model, critic, reference, actor_optimizer, critic_optimizer,
-                scaler, autocast_ctx, args, tokenizer, rollout, prompts):
+                scaler, autocast_ctx, args, tokenizer, rollout, prompts, step):
     encoded = tokenizer(prompts, padding=True, truncation=True, max_length=args.max_seq_len,
                         return_tensors="pt").to(args.device)
     result = rollout.rollout(encoded.input_ids, encoded.attention_mask,
@@ -60,6 +60,8 @@ def train_batch(model, critic, reference, actor_optimizer, critic_optimizer,
     prompt_mask = encoded.attention_mask
     full_mask = torch.cat((prompt_mask, completion_mask.to(prompt_mask.dtype)), dim=1)
     rewards = score_responses(prompts, result.completions, args.reward_model).to(args.device)
+    if args.debug_mode and is_main_process() and step % args.debug_interval == 0:
+        Logger(format_rollout_debug(step, prompts, result.completions, rewards, 1))
     positions = (encoded.input_ids.size(1) - 1) + torch.arange(n_keep, device=args.device)
 
     with torch.no_grad():
@@ -127,6 +129,15 @@ def train_batch(model, critic, reference, actor_optimizer, critic_optimizer,
                     dist.all_reduce(approx_kl, op=dist.ReduceOp.AVG)
                 kl_value += approx_kl.item()
                 kl_count += 1
+
+                if args.debug_log_ratio and ppo_epoch == 0 and offset == 0 and is_main_process():
+                    valid_log_ratio = log_ratio.detach()[response_mask.bool()]
+                    if valid_log_ratio.numel():
+                        Logger(
+                            f"[DEBUG] step={step} log_ratio max_abs={valid_log_ratio.abs().max().item():.6e} "
+                            f"mean_abs={valid_log_ratio.abs().mean().item():.6e} "
+                            f"mean={valid_log_ratio.mean().item():.6e}"
+                        )
 
                 if approx_kl.detach().item() > args.early_stop_kl:
                     scaler.scale((policy_logps.sum() + values.sum()) * 0).backward()
@@ -202,13 +213,17 @@ def main():
     parser.add_argument("--use_compile", type=int, choices=(0, 1), default=0)
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", default="MiniMind-O-PPO")
+    parser.add_argument("--debug_mode", action="store_true")
+    parser.add_argument("--debug_interval", type=int, default=20)
+    parser.add_argument("--debug_log_ratio", action="store_true")
     parser.add_argument("--rollout_engine", choices=("torch", "sglang"), default="torch")
     parser.add_argument("--sglang_base_url", default="http://localhost:8998")
     parser.add_argument("--sglang_shared_path", default="../out/sglang_ppo")
     args = parser.parse_args()
     if (args.ppo_epochs < 1 or args.mini_batch_size < 1 or args.max_gen_len < 1
-            or args.accumulation_steps < 1 or args.early_stop_kl <= 0):
-        parser.error("ppo_epochs, mini_batch_size, max_gen_len and accumulation_steps must be positive; early_stop_kl must be > 0")
+            or args.accumulation_steps < 1 or args.early_stop_kl <= 0 or args.debug_interval < 1):
+        parser.error("ppo_epochs, mini_batch_size, max_gen_len, accumulation_steps and debug_interval "
+                     "must be positive; early_stop_kl must be > 0")
 
     local_rank = init_distributed_mode()
     args.device = (f"cuda:{local_rank}" if dist.is_initialized()
@@ -291,7 +306,7 @@ def main():
                 group["lr"] = critic_lr
             metrics, _ = train_batch(model, critic, reference, actor_optimizer,
                                      critic_optimizer, scaler, autocast_ctx, args,
-                                     tokenizer, rollout, batch["prompt"])
+                                     tokenizer, rollout, batch["prompt"], global_step)
             rollout.update_policy(model)
             if step % args.log_interval == 0 or step == total_steps:
                 Logger(f"Epoch:[{epoch + 1}/{args.epochs}]({step}/{total_steps}), "
