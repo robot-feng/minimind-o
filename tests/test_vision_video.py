@@ -169,6 +169,24 @@ class TestVideoInput(unittest.TestCase):
         video = model.get_image_embeddings({"pixel_values": torch.zeros(2, 3, 3, 8, 8)})
         self.assertEqual(tuple(video.shape), (2, 3, 4, 3))
 
+    def test_raw_video_tensor_keeps_frame_axis_for_single_video_batch(self):
+        config = OmniConfig(
+            hidden_size=12, num_hidden_layers=1, vocab_size=128,
+            num_attention_heads=3, num_key_value_heads=1, intermediate_size=24,
+            talker_hidden_size=16, num_talker_hidden_layers=1,
+            image_hidden_size=3, image_token_len=4, max_position_embeddings=64,
+        )
+        model = MiniMindOmni(config, audio_encoder_path=None, vision_model_path=None).eval()
+        object.__setattr__(model, "vision_encoder", FakeTIPSv2())
+        model.vision_proj = nn.Linear(3, config.hidden_size, bias=False)
+        input_ids = torch.tensor([[1] + [config.image_ids[0]] * 4 + [7] + [config.image_ids[0]] * 4])
+        video = torch.stack((torch.ones(3, 8, 8), torch.full((3, 8, 8), 2.0))).unsqueeze(0)
+
+        with torch.inference_mode():
+            output = model(input_ids, pixel_values=video, text_only=True)
+
+        self.assertEqual(tuple(output.logits.shape), (1, input_ids.size(1), config.vocab_size))
+
 
 @unittest.skipUnless(os.environ.get("MINIMIND_RUN_TIPSV2_INTEGRATION") == "1",
                      "set MINIMIND_RUN_TIPSV2_INTEGRATION=1 to load the real TIPSv2 checkpoint")

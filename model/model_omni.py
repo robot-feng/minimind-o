@@ -333,12 +333,11 @@ class MiniMindOmni(MiniMindForCausalLM):
                     pixel_values = pixel_values.squeeze(2)
                 if len(pixel_values.shape) == 4:
                     pixel_values = pixel_values.unsqueeze(1)
-                bs, num, c, im_h, im_w = pixel_values.shape
-                stack_dim = 1 if bs > 1 else 0
+                num = pixel_values.size(1)
                 vision_tensors = torch.stack([
                     self.encode_image_inputs(pixel_values[:, i, :, :, :])
                     for i in range(num)
-                ], dim=stack_dim)
+                ], dim=1)
             hidden_states = self.count_vision_proj(tokens=text_ids, h=hidden_states, vision_tensors=vision_tensors, seqlen=seq_length)
         bridge_states = hidden_states
         for i, (layer, past_key_value) in enumerate(zip(self.thinker.layers, past_key_values[:n_thinker])):
