@@ -236,7 +236,7 @@ python eval_omni.py --weight sft_omni
 python eval_omni.py --weight sft_zero --mode 6 --video_dir ./dataset/videos --video_frames 4
 ```
 
-mini 数据不含视频监督；若要训练视频级时序理解，还需增加相应训练数据。
+这种稀疏视频输入遵循常见 VLM 流程：解码视频、按时间采样帧、保留时间戳，并将有序帧交给视觉编码器；可参照 [Transformers Video Processor](https://huggingface.co/docs/transformers/main_classes/video_processor) 和 [Qwen2-VL](https://huggingface.co/docs/transformers/model_doc/qwen2_vl)。MiniMind-O 复用 TIPSv2 图像编码器处理最多 4 帧，时间戳以文本帧标记传入 Thinker；当前没有专门的时空编码器，也没有视频监督训练数据，因此这是视频帧输入与推理链路，不代表已具备充分训练的视频时序理解能力。
 
 # 📌 模型细节
 
