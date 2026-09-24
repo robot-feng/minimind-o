@@ -337,6 +337,19 @@ full 数据集与发布的 `minimind-3o` / `minimind-3o-moe` 权重对应，覆�
 
 训练模式里，`all` 会更新 MiniMind / Talker / projector，`audio_proj` 和 `vision_proj` 只用于单独对齐对应投影层；SenseVoice-Small、TIPSv2 和 Mimi 始终冻结。Dense 与 MoE 版本沿用同一套数据顺序。mini 命令只用于快速跑通链路，默认单卡 3090 约 2 小时完成；发布权重对应 full 数据训练。
 
+### 4' 文本偏好对齐（DPO）
+
+`trainer/train_dpo_omni.py` 使用 MiniMind-O 权重和 checkpoint，读取 MiniMind 格式的 `dpo.jsonl`（每条样本包含 `chosen`、`rejected` 两组对话）。当前 DPO 入口训练文本主干与词表头；音频、图像分支保持冻结，多模态监督仍走 `train_sft_omni.py`。
+
+```bash
+cd trainer
+torchrun --standalone --nproc_per_node 4 train_dpo_omni.py \
+  --data_path ../dataset/dpo.jsonl --from_weight sft_zero \
+  --save_weight dpo_omni --batch_size 2 --max_seq_len 1024
+```
+
+`--batch_size` 是每卡 batch。DPO 仅计算 assistant 回复 token 的偏好损失，prompt 与 padding 不参与打分；可通过 `--from_weight` 指定已训练的 MiniMind-O checkpoint。
+
 下面给出 full 训练过程中的 T2A 与 A2A loss 曲线（仅供参考）：
 
 ![](./images/t2a_training_curves.jpg)

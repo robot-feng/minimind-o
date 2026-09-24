@@ -338,6 +338,19 @@ The training entry point is `train_sft_omni.py`, and the recommended pipeline ca
 
 Among training modes, `all` updates MiniMind / Talker / projectors, while `audio_proj` and `vision_proj` are used solely to align the corresponding projector. SenseVoice-Small, TIPSv2 and Mimi are kept frozen throughout. The Dense and MoE variants share the same data ordering. The mini commands are meant only to make the pipeline runnable end-to-end and finish in ~2 hours on a single RTX 3090 by default; the released weights correspond to full training.
 
+### Text preference alignment (DPO)
+
+`trainer/train_dpo_omni.py` uses MiniMind-O weights and checkpoints, and reads MiniMind-style `dpo.jsonl` rows containing `chosen` and `rejected` message lists. This entry point updates the text backbone and vocabulary head while keeping the audio and vision paths frozen; multimodal supervision remains in `train_sft_omni.py`.
+
+```bash
+cd trainer
+torchrun --standalone --nproc_per_node 4 train_dpo_omni.py \
+  --data_path ../dataset/dpo.jsonl --from_weight sft_zero \
+  --save_weight dpo_omni --batch_size 2 --max_seq_len 1024
+```
+
+`--batch_size` is per rank. Only assistant response tokens contribute to the preference loss; prompt and padding tokens are excluded. Use `--from_weight` to choose the MiniMind-O checkpoint to align.
+
 T2A and A2A loss curves during full training are shown below for reference:
 
 ![](./images/t2a_training_curves.jpg)

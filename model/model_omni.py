@@ -158,6 +158,8 @@ class MiniMindOmni(MiniMindForCausalLM):
 
     @staticmethod
     def load_sensevoice(path):
+        if path is None:
+            return None, None
         if not os.path.exists(path):
             warnings.warn(f"[MiniMindOmni] SenseVoice path not found: {path}")
             return None, None
@@ -295,7 +297,7 @@ class MiniMindOmni(MiniMindForCausalLM):
             out.append(hb)
         return torch.stack(out)
 
-    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, logits_to_keep=0, audio_inputs=None, audio_lens=None, pixel_values=None, **args):
+    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, logits_to_keep=0, audio_inputs=None, audio_lens=None, pixel_values=None, text_only=False, **args):
         if len(input_ids.shape) == 2:
             batch_size, seq_length = input_ids.shape
             text_ids = input_ids
@@ -345,6 +347,18 @@ class MiniMindOmni(MiniMindForCausalLM):
             if i == self.config.bridge_layer: bridge_states = hidden_states
         h_thinker = self.thinker.norm(hidden_states)
 
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        if text_only:
+            aux_loss = sum(
+                (layer.mlp.aux_loss for layer in self.thinker.layers if isinstance(layer.mlp, MOEFeedForward)),
+                h_thinker.new_zeros(()),
+            )
+            return OmniCausalLMOutputWithPast(
+                aux_loss=aux_loss,
+                logits=self.thinker.lm_head(h_thinker[:, slice_indices, :]),
+                past_key_values=presents,
+            )
+
         # ======= Talker: thinker hidden + audio codes, output audio logits =======
         talker_emb = self.talker.embed_tokens(audio_ids)
         spk_emb = args.get('spk_emb', None)
@@ -358,7 +372,6 @@ class MiniMindOmni(MiniMindForCausalLM):
             presents.append(present)
         h_talker = self.talker.norm(hidden_states)
 
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         aux_loss = sum(l.mlp.aux_loss for l in list(self.thinker.layers) + list(self.talker.layers) if isinstance(l.mlp, MOEFeedForward))
         aux_loss += sum(p.sum() for p in self.audio_proj.parameters()) * 0 + sum(p.sum() for p in self.vision_proj.parameters()) * 0 + sum(p.sum() for p in self.talker.lm_head.adapters.parameters()) * 0 + sum(p.sum() for p in self.talker.spk_proj.parameters()) * 0 # dummy gradient
         text_logits = self.thinker.lm_head(h_thinker[:, slice_indices, :])
