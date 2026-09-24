@@ -341,7 +341,7 @@ full 数据集与发布的 `minimind-3o` / `minimind-3o-moe` 权重对应，覆�
 
 ### MiniMind 训练能力在 MiniMind-O 中的对应入口
 
-`minimind/trainer` 中与语言模型训练相关的能力，已适配到根仓库 `trainer/`，并使用 MiniMind-O 的模型、tokenizer 与 checkpoint 格式。文本预训练、文本 SFT、LoRA、蒸馏和偏好/RL 入口目前只训练 Thinker 文本路径；音频、图像、视频的多模态监督仍通过上面的 `train_sft_omni.py` 完成。
+MiniMind 上游 `trainer/` 中与语言模型训练相关的能力，已适配到根仓库 `trainer/`，并使用 MiniMind-O 的模型、tokenizer 与 checkpoint 格式。文本预训练、文本 SFT、LoRA、蒸馏和偏好/RL 入口目前只训练 Thinker 文本路径；音频和图像监督通过上面的 `train_sft_omni.py` 完成。视频目前支持均匀抽帧、时间标记和模型推理输入；仓库尚未提供视频监督数据集适配器，因此训练视频时序理解需要先准备相应数据并扩展数据管线。
 
 | 能力 | MiniMind-O 入口 | 数据文件 / 说明 |
 |---|---|---|

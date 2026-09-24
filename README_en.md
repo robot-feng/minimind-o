@@ -342,7 +342,7 @@ Among training modes, `all` updates MiniMind / Talker / projectors, while `audio
 
 ### MiniMind training capabilities in MiniMind-O
 
-The language-model training capabilities from `minimind/trainer` have been adapted under the root `trainer/` directory to use MiniMind-O's model, tokenizer and checkpoint formats. Text pretraining, text SFT, LoRA, distillation and preference/RL currently train only the Thinker text path. Multimodal audio, image and video supervision remains in `train_sft_omni.py` above.
+The language-model training capabilities from upstream MiniMind's `trainer/` have been adapted under the root `trainer/` directory to use MiniMind-O's model, tokenizer and checkpoint formats. Text pretraining, text SFT, LoRA, distillation and preference/RL currently train only the Thinker text path. Audio and image supervision use `train_sft_omni.py` above. Video inputs currently support uniform frame sampling, timestamps and model inference; the repository does not yet include a video-supervised dataset adapter, so training temporal video understanding requires adding suitable data and extending the data pipeline.
 
 | Capability | MiniMind-O entry point | Data / notes |
 |---|---|---|
