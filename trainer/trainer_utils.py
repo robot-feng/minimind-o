@@ -8,7 +8,7 @@ import numpy as np
 import datasets
 import torch
 import torch.distributed as dist
-from torch.utils.data import Sampler
+from torch.utils.data import Sampler, DistributedSampler
 from transformers import AutoTokenizer
 from model.model_omni import MiniMindOmni
     
@@ -64,12 +64,22 @@ def log_model_params(model, ignore_patterns=['audio_encoder', 'vision_encoder'])
 
 
 def rescale_resume_step(step, saved_world_size, current_world_size,
-                       saved_batch_size=None, current_batch_size=None):
+                        saved_batch_size=None, current_batch_size=None):
     if saved_batch_size is not None and current_batch_size is not None:
         saved_global_batch = saved_batch_size * saved_world_size
         current_global_batch = current_batch_size * current_world_size
         return step * saved_global_batch // current_global_batch
     return step * saved_world_size // current_world_size
+
+
+def get_epoch_sampler(dataset, epoch, distributed_sampler=None, seed=42):
+    """Return a deterministic shuffled sampler for one epoch on every rank."""
+    if distributed_sampler is not None:
+        distributed_sampler.set_epoch(epoch)
+        return distributed_sampler
+    generator = torch.Generator()
+    generator.manual_seed(seed + epoch)
+    return torch.randperm(len(dataset), generator=generator).tolist()
 
 
 def init_omni_model(omni_config, from_weight='full_sft', tokenizer_path='../model', audio_encoder_path='../model/SenseVoiceSmall', vision_model_path='google/tipsv2-b14', save_dir='../out', device='cuda', freeze_backbone='none', from_resume=0):
@@ -152,10 +162,9 @@ def omni_checkpoint(omni_config, weight='pretrain_omni', model=None, optimizer=N
         for key, value in kwargs.items():
             if value is not None:
                 if hasattr(value, 'state_dict'):
-                    if isinstance(value, DistributedDataParallel):
-                        resume_data[key] = value.module.state_dict()
-                    else:
-                        resume_data[key] = value.state_dict()
+                    raw_value = value.module if isinstance(value, DistributedDataParallel) else value
+                    raw_value = getattr(raw_value, '_orig_mod', raw_value)
+                    resume_data[key] = raw_value.state_dict()
                 else:
                     resume_data[key] = value
         

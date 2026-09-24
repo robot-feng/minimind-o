@@ -18,7 +18,7 @@ from trainer.ppo_utils import clipped_value_loss, generalized_advantage_estimate
 from trainer.rl_utils import RewardModel, score_responses
 from trainer.rollout_engine import create_rollout_engine, unwrap_model
 from trainer.trainer_utils import (
-    Logger, SkipBatchSampler, get_lr, init_distributed_mode, init_omni_model,
+    Logger, SkipBatchSampler, get_epoch_sampler, get_lr, init_distributed_mode, init_omni_model,
     is_main_process, log_model_params, omni_checkpoint, setup_seed,
 )
 
@@ -65,6 +65,7 @@ def train_batch(model, critic, reference, actor_optimizer, critic_optimizer,
     with torch.no_grad():
         old_value_seq, _ = unwrap_model(critic)(result.output_ids, attention_mask=full_mask)
         old_values = old_value_seq.gather(1, positions.expand(result.output_ids.size(0), -1))
+        old_values = old_values * completion_mask
         reference_logps, _ = _policy_logps(reference, result.output_ids, n_keep, full_mask)
 
     token_rewards = torch.zeros_like(old_values)
@@ -78,24 +79,26 @@ def train_batch(model, critic, reference, actor_optimizer, critic_optimizer,
     )
     actor_optimizer.zero_grad(set_to_none=True)
     critic_optimizer.zero_grad(set_to_none=True)
-    policy_loss_value = value_loss_value = 0.0
+    batch_size = result.output_ids.size(0)
+    mini_batch_size = max(1, min(args.mini_batch_size, batch_size))
+    pending_batches = 0
+    stop_updates = False
+    policy_loss_value = value_loss_value = kl_value = 0.0
+    metric_count = kl_count = 0
 
-    for _ in range(args.ppo_epochs):
-        with autocast_ctx:
-            policy_logps, actor_aux = _policy_logps(model, result.output_ids, n_keep, full_mask)
-            value_seq, critic_aux = critic(result.output_ids, attention_mask=full_mask)
-            values = value_seq.gather(1, positions.expand(result.output_ids.size(0), -1))
-            policy_loss = ppo_policy_loss(
-                policy_logps, result.per_token_logps.detach(), advantages,
-                completion_mask, clip_epsilon=args.clip_epsilon,
-                reference_logps=reference_logps, beta=args.beta,
-            )
-            value_loss = clipped_value_loss(values, old_values, returns,
-                                             completion_mask, args.value_clip)
-            total_loss = (policy_loss + args.value_coef * value_loss + actor_aux + critic_aux)
-        scaler.scale(total_loss).backward()
+    def apply_update():
+        nonlocal pending_batches
+        if pending_batches == 0:
+            return
         scaler.unscale_(actor_optimizer)
         scaler.unscale_(critic_optimizer)
+        correction = args.accumulation_steps / pending_batches
+        if correction != 1:
+            for optimizer in (actor_optimizer, critic_optimizer):
+                for group in optimizer.param_groups:
+                    for parameter in group["params"]:
+                        if parameter.grad is not None:
+                            parameter.grad.mul_(correction)
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         torch.nn.utils.clip_grad_norm_(critic.parameters(), args.grad_clip)
         scaler.step(actor_optimizer)
@@ -103,12 +106,59 @@ def train_batch(model, critic, reference, actor_optimizer, critic_optimizer,
         scaler.update()
         actor_optimizer.zero_grad(set_to_none=True)
         critic_optimizer.zero_grad(set_to_none=True)
-        policy_loss_value, value_loss_value = policy_loss.item(), value_loss.item()
+        pending_batches = 0
 
-    log_ratio = (reference_logps - policy_logps).detach()
-    kl = ((log_ratio.exp() - log_ratio - 1) * completion_mask).sum() / completion_mask.sum().clamp(min=1)
-    return {"reward": rewards.mean().item(), "policy_loss": policy_loss_value,
-            "value_loss": value_loss_value, "kl": kl.item(),
+    for ppo_epoch in range(args.ppo_epochs):
+        permutation = torch.randperm(batch_size, device=args.device)
+        for offset in range(0, batch_size, mini_batch_size):
+            indices = permutation[offset:offset + mini_batch_size]
+            with autocast_ctx:
+                policy_logps, actor_aux = _policy_logps(
+                    model, result.output_ids[indices], n_keep, full_mask[indices]
+                )
+                value_seq, critic_aux = critic(
+                    result.output_ids[indices], attention_mask=full_mask[indices]
+                )
+                values = value_seq.gather(1, positions.expand(len(indices), -1))
+                log_ratio = policy_logps - result.per_token_logps[indices].detach()
+                response_mask = completion_mask[indices]
+                approx_kl = (0.5 * log_ratio.detach().square() * response_mask).sum() / response_mask.sum().clamp(min=1)
+                if dist.is_initialized():
+                    dist.all_reduce(approx_kl, op=dist.ReduceOp.AVG)
+                kl_value += approx_kl.item()
+                kl_count += 1
+
+                if approx_kl.detach().item() > args.early_stop_kl:
+                    scaler.scale((policy_logps.sum() + values.sum()) * 0).backward()
+                    stop_updates = True
+                    apply_update()
+                    break
+
+                policy_loss = ppo_policy_loss(
+                    policy_logps, result.per_token_logps[indices].detach(), advantages[indices],
+                    response_mask, clip_epsilon=args.clip_epsilon,
+                    reference_logps=reference_logps[indices], beta=args.beta,
+                )
+                value_loss = clipped_value_loss(
+                    values, old_values[indices], returns[indices], response_mask,
+                    args.value_clip,
+                )
+                total_loss = policy_loss + args.value_coef * value_loss + actor_aux + critic_aux
+
+            scaler.scale(total_loss / args.accumulation_steps).backward()
+            pending_batches += 1
+            policy_loss_value += policy_loss.detach().item()
+            value_loss_value += value_loss.detach().item()
+            metric_count += 1
+            at_epoch_end = offset + mini_batch_size >= batch_size
+            if pending_batches >= args.accumulation_steps or at_epoch_end:
+                apply_update()
+        if stop_updates:
+            break
+
+    count = max(metric_count, 1)
+    return {"reward": rewards.mean().item(), "policy_loss": policy_loss_value / count,
+            "value_loss": value_loss_value / count, "kl": kl_value / max(kl_count, 1),
             "response_len": completion_mask.sum(dim=1).float().mean().item()}, result
 
 
@@ -120,19 +170,23 @@ def main():
     parser.add_argument("--save_weight", default="ppo_actor_omni")
     parser.add_argument("--from_weight", default="sft_zero")
     parser.add_argument("--from_resume", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--device", default=None)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=2, help="Per-rank prompt batch")
     parser.add_argument("--max_seq_len", type=int, default=768)
     parser.add_argument("--max_gen_len", type=int, default=256)
     parser.add_argument("--learning_rate", type=float, default=3e-7)
     parser.add_argument("--critic_learning_rate", type=float, default=1e-5)
-    parser.add_argument("--ppo_epochs", type=int, default=1)
+    parser.add_argument("--ppo_epochs", "--ppo_update_iters", dest="ppo_epochs", type=int, default=1)
+    parser.add_argument("--mini_batch_size", type=int, default=2)
+    parser.add_argument("--accumulation_steps", type=int, default=1)
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--gae_lambda", type=float, default=0.95)
+    parser.add_argument("--gae_lambda", "--lam", dest="gae_lambda", type=float, default=0.95)
     parser.add_argument("--clip_epsilon", type=float, default=0.2)
-    parser.add_argument("--value_clip", type=float, default=0.2)
-    parser.add_argument("--value_coef", type=float, default=0.5)
-    parser.add_argument("--beta", type=float, default=0.02)
+    parser.add_argument("--value_clip", "--cliprange_value", dest="value_clip", type=float, default=0.2)
+    parser.add_argument("--value_coef", "--vf_coef", dest="value_coef", type=float, default=0.5)
+    parser.add_argument("--beta", "--kl_coef", dest="beta", type=float, default=0.02)
+    parser.add_argument("--early_stop_kl", type=float, default=0.25)
     parser.add_argument("--hidden_size", type=int, default=768)
     parser.add_argument("--num_hidden_layers", type=int, default=8)
     parser.add_argument("--use_moe", type=int, choices=(0, 1), default=0)
@@ -144,18 +198,22 @@ def main():
     parser.add_argument("--log_interval", type=int, default=1)
     parser.add_argument("--save_interval", type=int, default=20)
     parser.add_argument("--tokenizer_path", default="../model")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--use_compile", type=int, choices=(0, 1), default=0)
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", default="MiniMind-O-PPO")
     parser.add_argument("--rollout_engine", choices=("torch", "sglang"), default="torch")
     parser.add_argument("--sglang_base_url", default="http://localhost:8998")
     parser.add_argument("--sglang_shared_path", default="../out/sglang_ppo")
     args = parser.parse_args()
-    if args.ppo_epochs < 1 or args.max_gen_len < 1:
-        parser.error("ppo_epochs and max_gen_len must be positive")
+    if (args.ppo_epochs < 1 or args.mini_batch_size < 1 or args.max_gen_len < 1
+            or args.accumulation_steps < 1 or args.early_stop_kl <= 0):
+        parser.error("ppo_epochs, mini_batch_size, max_gen_len and accumulation_steps must be positive; early_stop_kl must be > 0")
 
     local_rank = init_distributed_mode()
-    args.device = f"cuda:{local_rank}" if dist.is_initialized() else ("cuda:0" if torch.cuda.is_available() else "cpu")
-    setup_seed(42 + (dist.get_rank() if dist.is_initialized() else 0))
+    args.device = (f"cuda:{local_rank}" if dist.is_initialized()
+                   else args.device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    setup_seed(args.seed + (dist.get_rank() if dist.is_initialized() else 0))
     os.makedirs(args.save_dir, exist_ok=True)
     config = OmniConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers,
                         use_moe=bool(args.use_moe),
@@ -195,7 +253,7 @@ def main():
     autocast_dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}.get(args.dtype)
     autocast_ctx = torch.autocast("cuda", dtype=autocast_dtype) if "cuda" in args.device and autocast_dtype else nullcontext()
     dataset = RLAIFPromptDataset(args.data_path, tokenizer, args.thinking_ratio)
-    sampler = DistributedSampler(dataset, shuffle=True) if dist.is_initialized() else None
+    sampler = DistributedSampler(dataset, shuffle=True, seed=args.seed) if dist.is_initialized() else None
     start_epoch, start_step = (resume.get("epoch", 0), resume.get("step", 0)) if resume else (0, 0)
     if args.use_wandb and is_main_process():
         import swanlab
@@ -203,6 +261,10 @@ def main():
     else:
         wandb = None
     log_model_params(model)
+    if args.use_compile:
+        model = torch.compile(model)
+        critic = torch.compile(critic)
+        Logger("torch.compile enabled")
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank], broadcast_buffers=False)
         critic = DistributedDataParallel(critic, device_ids=[local_rank], broadcast_buffers=False)
@@ -213,18 +275,20 @@ def main():
     rollout.update_policy(model)
 
     for epoch in range(start_epoch, args.epochs):
-        if sampler:
-            sampler.set_epoch(epoch)
+        epoch_sampler = get_epoch_sampler(dataset, epoch, sampler, seed=args.seed)
         skip = start_step if epoch == start_epoch else 0
-        batch_sampler = SkipBatchSampler(sampler or range(len(dataset)), args.batch_size, skip)
+        batch_sampler = SkipBatchSampler(epoch_sampler, args.batch_size, skip)
         loader = DataLoader(dataset, batch_sampler=batch_sampler, num_workers=args.num_workers,
                             pin_memory="cuda" in args.device)
         total_steps = len(loader) + skip
         for step, batch in enumerate(loader, start=skip + 1):
             global_step = epoch * total_steps + step
             lr = get_lr(global_step, args.epochs * total_steps, args.learning_rate)
+            critic_lr = get_lr(global_step, args.epochs * total_steps, args.critic_learning_rate)
             for group in actor_optimizer.param_groups:
                 group["lr"] = lr
+            for group in critic_optimizer.param_groups:
+                group["lr"] = critic_lr
             metrics, _ = train_batch(model, critic, reference, actor_optimizer,
                                      critic_optimizer, scaler, autocast_ctx, args,
                                      tokenizer, rollout, batch["prompt"])
@@ -233,9 +297,10 @@ def main():
                 Logger(f"Epoch:[{epoch + 1}/{args.epochs}]({step}/{total_steps}), "
                        f"reward:{metrics['reward']:.4f}, kl:{metrics['kl']:.4f}, "
                        f"actor:{metrics['policy_loss']:.4f}, critic:{metrics['value_loss']:.4f}, "
-                       f"response_len:{metrics['response_len']:.1f}, lr:{lr:.8f}")
+                       f"response_len:{metrics['response_len']:.1f}, lr:{lr:.8f}, "
+                       f"critic_lr:{critic_lr:.8f}")
                 if wandb:
-                    wandb.log(metrics | {"learning_rate": lr})
+                    wandb.log(metrics | {"learning_rate": lr, "critic_learning_rate": critic_lr})
             if (step % args.save_interval == 0 or step == total_steps) and is_main_process():
                 raw = unwrap_model(model)
                 moe_suffix = "_moe" if config.use_moe else ""

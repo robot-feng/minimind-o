@@ -2,6 +2,8 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 import torch
 
@@ -12,10 +14,10 @@ from model.model_omni import MiniMindOmni, OmniConfig
 from trainer.alignment_utils import dpo_loss, masked_sequence_logps, token_log_probs
 from trainer.agent_tools import calculate_agent_reward, execute_tool, parse_tool_calls, safe_math_eval
 from trainer.rl_utils import grpo_cispo_loss, group_relative_advantages, score_responses
-from trainer.rollout_engine import SGLangRolloutEngine, TorchRolloutEngine
+from trainer.rollout_engine import RolloutResult, SGLangRolloutEngine, TorchRolloutEngine
 from trainer.training_losses import causal_lm_loss, masked_distillation_loss
 from trainer.ppo_utils import clipped_value_loss, generalized_advantage_estimate, ppo_policy_loss
-from trainer.train_ppo import PPOValueModel
+from trainer.train_ppo import PPOValueModel, _trainable_value, train_batch
 from trainer.train_tokenizer import get_texts, train_tokenizer
 
 
@@ -213,6 +215,22 @@ class TestOmniTextTrainingSetup(unittest.TestCase):
         self.assertEqual(tuple(values.shape), (2, 5))
         self.assertEqual(aux.ndim, 0)
 
+    def test_ppo_trains_omni_text_critic_backbone_without_lm_head(self):
+        config = OmniConfig(
+            hidden_size=32, num_hidden_layers=2, vocab_size=64,
+            num_attention_heads=4, num_key_value_heads=2,
+            talker_hidden_size=32, num_talker_hidden_layers=1,
+            image_hidden_size=8, image_token_len=4, spk_emb_size=4,
+            max_position_embeddings=16,
+        )
+        critic = PPOValueModel(MiniMindOmni(config, audio_encoder_path=None, vision_model_path=None))
+        _trainable_value(critic)
+        trainable = {name for name, parameter in critic.named_parameters() if parameter.requires_grad}
+        self.assertIn("value_head.weight", trainable)
+        self.assertTrue(any(name.startswith("backbone.model.layers.") for name in trainable))
+        self.assertFalse(any("lm_head" in name for name in trainable))
+        self.assertFalse(any(name.startswith("backbone.talker.") for name in trainable))
+
 
 class TestPPOLosses(unittest.TestCase):
     def test_gae_masks_padding_and_propagates_terminal_reward(self):
@@ -237,6 +255,95 @@ class TestPPOLosses(unittest.TestCase):
         (policy_loss + value_loss).backward()
         self.assertIsNotNone(new_logps.grad)
         self.assertIsNotNone(values.grad)
+
+    def test_ppo_minibatches_accumulate_and_early_stop(self):
+        class Batch:
+            def __init__(self, ids):
+                self.input_ids = ids
+                self.attention_mask = torch.ones_like(ids)
+
+            def to(self, device):
+                self.input_ids = self.input_ids.to(device)
+                self.attention_mask = self.attention_mask.to(device)
+                return self
+
+        class Tokenizer:
+            pad_token_id = 0
+            eos_token_id = 2
+
+            def __call__(self, prompts, **kwargs):
+                return Batch(torch.tensor([[1, 3, 4] for _ in prompts]))
+
+        class Policy(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(16, 8)
+                self.head = torch.nn.Linear(8, 16)
+
+            def forward(self, input_ids, logits_to_keep, **kwargs):
+                hidden = self.embed(input_ids[:, -logits_to_keep:])
+                logits = self.head(hidden)
+                return SimpleNamespace(logits=logits, aux_loss=logits.sum() * 0)
+
+        class Critic(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(16, 8)
+                self.head = torch.nn.Linear(8, 1)
+
+            def forward(self, input_ids, attention_mask=None):
+                hidden = self.embed(input_ids)
+                return self.head(hidden).squeeze(-1), hidden.sum() * 0
+
+        class Rollout:
+            def __init__(self, old_logp):
+                self.old_logp = old_logp
+
+            def rollout(self, prompt_ids, attention_mask, **kwargs):
+                suffix = torch.tensor([[6, 7], [8, 9]], device=prompt_ids.device)
+                completion_ids = suffix[:prompt_ids.size(0)]
+                output_ids = torch.cat((prompt_ids, completion_ids), dim=1)
+                mask = torch.ones_like(completion_ids)
+                return RolloutResult(
+                    output_ids, completion_ids,
+                    torch.full(completion_ids.shape, self.old_logp, device=prompt_ids.device),
+                    ["short response"] * prompt_ids.size(0),
+                    attention_mask.sum(dim=1), mask,
+                )
+
+        def make_args(early_stop_kl):
+            return SimpleNamespace(
+                device="cpu", max_seq_len=8, max_gen_len=2, reward_model=None,
+                gamma=0.99, gae_lambda=0.95, ppo_epochs=2, mini_batch_size=1,
+                accumulation_steps=2, clip_epsilon=0.2, value_clip=0.2,
+                value_coef=0.5, beta=0.02, early_stop_kl=early_stop_kl,
+                grad_clip=1.0,
+            )
+
+        model, critic = Policy(), Critic()
+        reference = Policy()
+        reference.load_state_dict(model.state_dict())
+        actor_optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+        critic_optimizer = torch.optim.AdamW(critic.parameters(), lr=0.01)
+        scaler = torch.amp.GradScaler("cuda", enabled=False)
+        metrics, _ = train_batch(
+            model, critic, reference, actor_optimizer, critic_optimizer, scaler,
+            nullcontext(), make_args(1000), Tokenizer(), Rollout(-2.0), ["p1", "p2"],
+        )
+        self.assertTrue(torch.isfinite(torch.tensor(metrics["policy_loss"])))
+        self.assertEqual(int(actor_optimizer.state[model.embed.weight]["step"]), 2)
+        self.assertEqual(int(critic_optimizer.state[critic.embed.weight]["step"]), 2)
+
+        stopped_model, stopped_critic = Policy(), Critic()
+        stopped_actor_optimizer = torch.optim.AdamW(stopped_model.parameters(), lr=0.01)
+        stopped_critic_optimizer = torch.optim.AdamW(stopped_critic.parameters(), lr=0.01)
+        train_batch(
+            stopped_model, stopped_critic, reference, stopped_actor_optimizer,
+            stopped_critic_optimizer, scaler, nullcontext(), make_args(0.01),
+            Tokenizer(), Rollout(-20.0), ["p1", "p2"],
+        )
+        self.assertEqual(len(stopped_actor_optimizer.state), 0)
+        self.assertEqual(len(stopped_critic_optimizer.state), 0)
 
 
 class TestTextDatasets(unittest.TestCase):

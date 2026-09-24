@@ -17,7 +17,7 @@ from dataset.text_dataset import TextPretrainDataset, TextSFTDataset
 from model.lora import inject_lora, lora_state_dict, merge_lora
 from model.model_omni import OmniConfig
 from trainer.trainer_utils import (
-    Logger, SkipBatchSampler, get_lr, init_distributed_mode, init_omni_model,
+    Logger, SkipBatchSampler, get_epoch_sampler, get_lr, init_distributed_mode, init_omni_model,
     is_main_process, log_model_params, omni_checkpoint, setup_seed,
 )
 from trainer.training_losses import causal_lm_loss, masked_distillation_loss
@@ -113,27 +113,30 @@ def main(task):
     parser.add_argument("--save_dir", default="../out")
     parser.add_argument("--resume_dir", default="../checkpoints")
     parser.add_argument("--save_weight", default=save_default)
-    parser.add_argument("--from_weight", default=weight_default)
+    parser.add_argument("--from_weight", "--from_student_weight", dest="from_weight", default=weight_default)
     parser.add_argument("--from_resume", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--device", default=None)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=16, help="Per-rank batch size")
     parser.add_argument("--accumulation_steps", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=5e-4)
     parser.add_argument("--max_seq_len", type=int, default=768)
-    parser.add_argument("--hidden_size", type=int, default=768)
-    parser.add_argument("--num_hidden_layers", type=int, default=8)
-    parser.add_argument("--use_moe", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--hidden_size", "--student_hidden_size", dest="hidden_size", type=int, default=768)
+    parser.add_argument("--num_hidden_layers", "--student_num_layers", dest="num_hidden_layers", type=int, default=8)
+    parser.add_argument("--use_moe", "--student_use_moe", dest="use_moe", type=int, choices=(0, 1), default=0)
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--save_interval", type=int, default=1000)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tokenizer_path", default="../model")
+    parser.add_argument("--use_compile", type=int, choices=(0, 1), default=0)
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", default=f"MiniMind-O-{task.title()}")
-    parser.add_argument("--teacher_weight", default="full_sft")
+    parser.add_argument("--teacher_weight", "--from_teacher_weight", dest="teacher_weight", default="full_sft")
     parser.add_argument("--teacher_hidden_size", type=int, default=768)
-    parser.add_argument("--teacher_num_hidden_layers", type=int, default=8)
+    parser.add_argument("--teacher_num_hidden_layers", "--teacher_num_layers", dest="teacher_num_hidden_layers", type=int, default=8)
     parser.add_argument("--teacher_use_moe", type=int, choices=(0, 1), default=0)
     parser.add_argument("--alpha", type=float, default=0.5, help="CE weight for distillation")
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -149,8 +152,9 @@ def main(task):
         parser.error("alpha must be in [0, 1]")
 
     local_rank = init_distributed_mode()
-    args.device = f"cuda:{local_rank}" if dist.is_initialized() else ("cuda:0" if torch.cuda.is_available() else "cpu")
-    setup_seed(42 + (dist.get_rank() if dist.is_initialized() else 0))
+    args.device = (f"cuda:{local_rank}" if dist.is_initialized()
+                   else args.device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    setup_seed(args.seed + (dist.get_rank() if dist.is_initialized() else 0))
     os.makedirs(args.save_dir, exist_ok=True)
     config = OmniConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers,
                         use_moe=bool(args.use_moe))
@@ -199,7 +203,7 @@ def main(task):
 
     dataset_cls = TextPretrainDataset if task == "pretrain" else TextSFTDataset
     dataset = dataset_cls(args.data_path, tokenizer, max_length=args.max_seq_len)
-    sampler = DistributedSampler(dataset, shuffle=True) if dist.is_initialized() else None
+    sampler = DistributedSampler(dataset, shuffle=True, seed=args.seed) if dist.is_initialized() else None
     start_epoch, start_step = (resume.get("epoch", 0), resume.get("step", 0)) if resume else (0, 0)
     if args.use_wandb and is_main_process():
         import swanlab
@@ -207,14 +211,16 @@ def main(task):
     else:
         wandb = None
     log_model_params(model)
+    if args.use_compile:
+        model = torch.compile(model)
+        Logger("torch.compile enabled")
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank])
 
     for epoch in range(start_epoch, args.epochs):
-        if sampler:
-            sampler.set_epoch(epoch)
+        epoch_sampler = get_epoch_sampler(dataset, epoch, sampler, seed=args.seed)
         skip = start_step if epoch == start_epoch else 0
-        batches = SkipBatchSampler(sampler or range(len(dataset)), args.batch_size, skip)
+        batches = SkipBatchSampler(epoch_sampler, args.batch_size, skip)
         loader = DataLoader(dataset, batch_sampler=batches, num_workers=args.num_workers,
                             pin_memory="cuda" in args.device)
         total_steps = len(loader) + skip

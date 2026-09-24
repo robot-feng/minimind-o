@@ -18,7 +18,7 @@ from model.model_omni import OmniConfig
 from trainer.rl_utils import RewardModel, group_relative_advantages, score_responses, grpo_cispo_loss
 from trainer.rollout_engine import create_rollout_engine, unwrap_model
 from trainer.trainer_utils import (
-    Logger, SkipBatchSampler, get_lr, init_distributed_mode, init_omni_model,
+    Logger, SkipBatchSampler, get_epoch_sampler, get_lr, init_distributed_mode, init_omni_model,
     is_main_process, log_model_params, omni_checkpoint, setup_seed,
 )
 
@@ -117,6 +117,7 @@ def main():
     parser.add_argument("--save_weight", default="grpo_omni")
     parser.add_argument("--from_weight", default="sft_zero")
     parser.add_argument("--from_resume", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--device", default=None)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=2, help="Per-rank prompt batch")
     parser.add_argument("--num_generations", type=int, default=4)
@@ -139,6 +140,8 @@ def main():
     parser.add_argument("--log_interval", type=int, default=1)
     parser.add_argument("--save_interval", type=int, default=20)
     parser.add_argument("--tokenizer_path", default="../model")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--use_compile", type=int, choices=(0, 1), default=0)
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", default="MiniMind-O-GRPO")
     parser.add_argument("--rollout_engine", choices=("torch", "sglang"), default="torch")
@@ -149,8 +152,9 @@ def main():
         parser.error("num_generations must be >= 2 and accumulation_steps must be positive")
 
     local_rank = init_distributed_mode()
-    args.device = f"cuda:{local_rank}" if dist.is_initialized() else ("cuda:0" if torch.cuda.is_available() else "cpu")
-    setup_seed(42 + (dist.get_rank() if dist.is_initialized() else 0))
+    args.device = (f"cuda:{local_rank}" if dist.is_initialized()
+                   else args.device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    setup_seed(args.seed + (dist.get_rank() if dist.is_initialized() else 0))
     os.makedirs(args.save_dir, exist_ok=True)
     config = OmniConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers,
                         use_moe=bool(args.use_moe), max_position_embeddings=args.max_seq_len + args.max_gen_len)
@@ -180,7 +184,7 @@ def main():
     autocast_dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}.get(args.dtype)
     autocast_ctx = torch.autocast("cuda", dtype=autocast_dtype) if "cuda" in args.device and autocast_dtype else nullcontext()
     dataset = RLAIFPromptDataset(args.data_path, tokenizer, args.thinking_ratio)
-    sampler = DistributedSampler(dataset, shuffle=True) if dist.is_initialized() else None
+    sampler = DistributedSampler(dataset, shuffle=True, seed=args.seed) if dist.is_initialized() else None
     start_epoch, start_step = (resume.get("epoch", 0), resume.get("step", 0)) if resume else (0, 0)
     if args.use_wandb and is_main_process():
         import swanlab
@@ -188,6 +192,9 @@ def main():
     else:
         wandb = None
     log_model_params(model)
+    if args.use_compile:
+        model = torch.compile(model)
+        Logger("torch.compile enabled")
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank], broadcast_buffers=False)
     rollout = create_rollout_engine(
@@ -197,10 +204,9 @@ def main():
     rollout.update_policy(model)
 
     for epoch in range(start_epoch, args.epochs):
-        if sampler:
-            sampler.set_epoch(epoch)
+        epoch_sampler = get_epoch_sampler(dataset, epoch, sampler, seed=args.seed)
         skip = start_step if epoch == start_epoch else 0
-        batch_sampler = SkipBatchSampler(sampler or range(len(dataset)), args.batch_size, skip)
+        batch_sampler = SkipBatchSampler(epoch_sampler, args.batch_size, skip)
         loader = DataLoader(dataset, batch_sampler=batch_sampler, num_workers=args.num_workers,
                             pin_memory="cuda" in args.device)
         total_steps = len(loader) + skip
