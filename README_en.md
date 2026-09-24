@@ -340,6 +340,26 @@ The training entry point is `train_sft_omni.py`, and the recommended pipeline ca
 
 Among training modes, `all` updates MiniMind / Talker / projectors, while `audio_proj` and `vision_proj` are used solely to align the corresponding projector. SenseVoice-Small, TIPSv2 and Mimi are kept frozen throughout. The Dense and MoE variants share the same data ordering. The mini commands are meant only to make the pipeline runnable end-to-end and finish in ~2 hours on a single RTX 3090 by default; the released weights correspond to full training.
 
+### Full-data Dense training
+
+To train the same ~0.1B Dense model on the full data, download the three parquet files. The ModelScope mirror is recommended when Hugging Face transfers are unreliable:
+
+```bash
+modelscope download --dataset gongjy/minimind-o_dataset \
+  sft_t2a.parquet sft_a2a.parquet sft_i2t.parquet \
+  --local_dir ./dataset --max-workers 3
+```
+
+Alternatively, use Hugging Face:
+
+```bash
+HF_ENDPOINT=https://huggingface.co hf download jingyaogong/minimind-o_dataset \
+  sft_t2a.parquet sft_a2a.parquet sft_i2t.parquet \
+  --repo-type dataset --local-dir ./dataset
+```
+
+Then run `bash trainer/train_full_dense.sh`. It verifies the dataset SHA-256 values before training, runs seven resumable stages in T2A, A2A and I2T order, and writes the final checkpoint to `out/sft_omni_768.pth`. The default is four-GPU DDP with a per-GPU batch size of 32; override `CUDA_VISIBLE_DEVICES`, `NPROC_PER_NODE` or `BATCH_SIZE` as needed. Set `DRY_RUN=1` to inspect the commands without starting training.
+
 ### MiniMind training capabilities in MiniMind-O
 
 The language-model training capabilities from upstream MiniMind's `trainer/` have been adapted under the root `trainer/` directory to use MiniMind-O's model, tokenizer and checkpoint formats. Text pretraining, text SFT, LoRA, distillation and preference/RL currently train only the Thinker text path. Audio and image supervision use `train_sft_omni.py` above. Video inputs currently support uniform frame sampling, timestamps and model inference; the repository does not yet include a video-supervised dataset adapter, so training temporal video understanding requires adding suitable data and extending the data pipeline.

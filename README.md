@@ -342,12 +342,20 @@ full 数据集与发布的 `minimind-3o` / `minimind-3o-moe` 权重对应，覆�
 要用 full 数据训练同样约 0.1B 的 Dense 模型，先下载完整训练文件：
 
 ```bash
+modelscope download --dataset gongjy/minimind-o_dataset \
+  sft_t2a.parquet sft_a2a.parquet sft_i2t.parquet \
+  --local_dir ./dataset --max-workers 3
+```
+
+也可使用 Hugging Face：
+
+```bash
 HF_ENDPOINT=https://huggingface.co hf download jingyaogong/minimind-o_dataset \
   sft_t2a.parquet sft_a2a.parquet sft_i2t.parquet \
   --repo-type dataset --local-dir ./dataset
 ```
 
-然后运行 `bash trainer/train_full_dense.sh`。脚本按上面的 T2A、A2A、I2T 顺序训练七个阶段，为阶段保留独立断点，并将最终权重写入 `out/sft_omni_768.pth`。默认使用 4 卡 DDP、每卡 batch 32；可用 `CUDA_VISIBLE_DEVICES`、`NPROC_PER_NODE` 和 `BATCH_SIZE` 覆盖。运行前可设置 `DRY_RUN=1` 检查命令计划而不启动训练。
+然后运行 `bash trainer/train_full_dense.sh`。脚本会先校验三个 parquet 的 SHA-256，再按 T2A、A2A、I2T 顺序训练七个阶段，为阶段保留独立断点，并将最终权重写入 `out/sft_omni_768.pth`。默认使用 4 卡 DDP、每卡 batch 32；可用 `CUDA_VISIBLE_DEVICES`、`NPROC_PER_NODE` 和 `BATCH_SIZE` 覆盖。运行前可设置 `DRY_RUN=1` 检查命令计划而不启动训练。
 
 ### MiniMind 训练能力在 MiniMind-O 中的对应入口
 
