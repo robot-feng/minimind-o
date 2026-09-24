@@ -12,12 +12,27 @@ LOG_FILE="${LOG_FILE:-../out/sft_full_dense.log}"
 mkdir -p "$(dirname "$LOG_FILE")"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+declare -A expected_sha256=(
+    [sft_t2a.parquet]=2e5eb373e8853109f7d2d4e032a2a6e47088cd61873af0896e9fc32d1464597e
+    [sft_a2a.parquet]=48cd60f4dbc987fee459968637758b27858daab52dfe6f21ac257cd4af182965
+    [sft_i2t.parquet]=712f4026cd0e21b369feddca7334b1e465cb8182b5f298006f3f4f877f926643
+)
 for file in sft_t2a.parquet sft_a2a.parquet sft_i2t.parquet; do
     if [[ ! -s "$DATASET_DIR/$file" ]]; then
         printf 'Missing full training dataset: %s/%s\n' "$DATASET_DIR" "$file" >&2
         exit 1
     fi
 done
+if [[ "${DRY_RUN:-0}" != 1 ]]; then
+    for file in sft_t2a.parquet sft_a2a.parquet sft_i2t.parquet; do
+        actual_sha256="$(sha256sum "$DATASET_DIR/$file" | awk '{print $1}')"
+        if [[ "$actual_sha256" != "${expected_sha256[$file]}" ]]; then
+            printf 'Dataset checksum mismatch for %s: expected %s, got %s\n' \
+                "$DATASET_DIR/$file" "${expected_sha256[$file]}" "$actual_sha256" >&2
+            exit 1
+        fi
+    done
+fi
 if [[ "${DRY_RUN:-0}" != 1 ]]; then
     for file in ../out/llm_768.pth ../model/SenseVoiceSmall/model.pt; do
         if [[ ! -s "$file" ]]; then

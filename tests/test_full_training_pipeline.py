@@ -78,6 +78,33 @@ class TestFullTrainingPipeline(unittest.TestCase):
         self.assertIn("Missing full training dataset", result.stdout + result.stderr)
         self.assertNotIn("[dry-run]", result.stdout)
 
+    def test_dataset_checksum_mismatch_fails_before_training(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            temp = Path(temporary_dir)
+            dataset_dir = temp / "dataset"
+            dataset_dir.mkdir()
+            for name in DATA_FILES:
+                (dataset_dir / name).write_bytes(b"not the published dataset")
+
+            env = os.environ.copy()
+            env.update(
+                DATASET_DIR=str(dataset_dir),
+                DRY_RUN="0",
+                LOG_FILE=str(temp / "pipeline.log"),
+            )
+            result = subprocess.run(
+                ["bash", str(SCRIPT)],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Dataset checksum mismatch", result.stdout + result.stderr)
+        self.assertNotIn("[dry-run]", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
