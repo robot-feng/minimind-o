@@ -297,7 +297,7 @@ class MiniMindOmni(MiniMindForCausalLM):
             out.append(hb)
         return torch.stack(out)
 
-    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, logits_to_keep=0, audio_inputs=None, audio_lens=None, pixel_values=None, text_only=False, **args):
+    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, logits_to_keep=0, audio_inputs=None, audio_lens=None, pixel_values=None, text_only=False, return_hidden_states=False, **args):
         if len(input_ids.shape) == 2:
             batch_size, seq_length = input_ids.shape
             text_ids = input_ids
@@ -355,8 +355,9 @@ class MiniMindOmni(MiniMindForCausalLM):
             )
             return OmniCausalLMOutputWithPast(
                 aux_loss=aux_loss,
-                logits=self.thinker.lm_head(h_thinker[:, slice_indices, :]),
+                logits=None if return_hidden_states else self.thinker.lm_head(h_thinker[:, slice_indices, :]),
                 past_key_values=presents,
+                hidden_states=h_thinker if return_hidden_states else None,
             )
 
         # ======= Talker: thinker hidden + audio codes, output audio logits =======
@@ -383,6 +384,54 @@ class MiniMindOmni(MiniMindForCausalLM):
             past_key_values=presents,
             audio_logits=audio_logits,
         )
+
+    @torch.inference_mode()
+    def generate_text(self, input_ids, attention_mask=None, max_new_tokens=256, temperature=0.8,
+                      top_p=0.95, eos_token_id=2, pad_token_id=0):
+        """Generate batched text without running the audio Talker path."""
+        if input_ids.ndim != 2:
+            raise ValueError("input_ids must have shape (batch, sequence)")
+        if temperature < 0 or not 0 < top_p <= 1:
+            raise ValueError("temperature must be nonnegative and top_p must be in (0, 1]")
+        if max_new_tokens <= 0:
+            return input_ids
+        previous_mode = self.training
+        self.eval()
+        try:
+            pad_token_id = pad_token_id if pad_token_id is not None else eos_token_id
+            attention_mask = attention_mask if attention_mask is not None else input_ids.ne(pad_token_id).long()
+            output_ids = input_ids
+            finished = torch.zeros(input_ids.size(0), dtype=torch.bool, device=input_ids.device)
+            result = self(input_ids, attention_mask=attention_mask, use_cache=True,
+                          logits_to_keep=1, text_only=True)
+            past_key_values = result.past_key_values
+            logits = result.logits[:, -1].float()
+            for step in range(max_new_tokens):
+                if temperature == 0:
+                    next_token = logits.argmax(dim=-1)
+                else:
+                    scaled_logits = logits / temperature
+                    sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True, dim=-1)
+                    sorted_probs = torch.softmax(sorted_logits, dim=-1)
+                    remove = sorted_probs.cumsum(dim=-1) - sorted_probs > top_p
+                    sorted_logits[remove] = -torch.inf
+                    filtered = torch.full_like(scaled_logits, -torch.inf).scatter(1, sorted_indices, sorted_logits)
+                    next_token = torch.multinomial(torch.softmax(filtered, dim=-1), 1).squeeze(-1)
+                next_token = torch.where(finished, torch.full_like(next_token, pad_token_id), next_token)
+                output_ids = torch.cat((output_ids, next_token[:, None]), dim=1)
+                was_active = ~finished
+                finished |= next_token.eq(eos_token_id)
+                if finished.all() or step + 1 == max_new_tokens:
+                    break
+                attention_mask = torch.cat((attention_mask, was_active[:, None].long()), dim=1)
+                result = self(next_token[:, None], attention_mask=attention_mask,
+                              past_key_values=past_key_values, use_cache=True,
+                              logits_to_keep=1, text_only=True)
+                past_key_values = result.past_key_values
+                logits = result.logits[:, -1].float()
+            return output_ids
+        finally:
+            self.train(previous_mode)
 
     @torch.inference_mode()
     def generate(self, input_ids, eos_token_id=2, max_new_tokens=1024, temperature=0.75, top_p=0.90,

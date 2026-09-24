@@ -6,8 +6,17 @@ import unittest
 import torch
 
 from dataset.alignment_dataset import PreferenceDataset
+from dataset.text_dataset import TextSFTDataset
+from model.lora import LoRALinear, inject_lora, lora_state_dict, merge_lora
 from model.model_omni import MiniMindOmni, OmniConfig
 from trainer.alignment_utils import dpo_loss, masked_sequence_logps, token_log_probs
+from trainer.agent_tools import calculate_agent_reward, execute_tool, parse_tool_calls, safe_math_eval
+from trainer.rl_utils import grpo_cispo_loss, group_relative_advantages, score_responses
+from trainer.rollout_engine import SGLangRolloutEngine, TorchRolloutEngine
+from trainer.training_losses import causal_lm_loss, masked_distillation_loss
+from trainer.ppo_utils import clipped_value_loss, generalized_advantage_estimate, ppo_policy_loss
+from trainer.train_ppo import PPOValueModel
+from trainer.train_tokenizer import get_texts, train_tokenizer
 
 
 class FakeEncoding(dict):
@@ -28,6 +37,59 @@ class FakeTokenizer:
 
     def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, tools=None):
         return "".join(f"<s>{m['role']}\n{m['content']}</s>\n" for m in messages)
+
+    def decode(self, ids, skip_special_tokens=True):
+        return " ".join(str(token) for token in ids)
+
+
+class TestRollouts(unittest.TestCase):
+    def test_batched_text_generation_and_rollout_scores(self):
+        config = OmniConfig(
+            hidden_size=32, num_hidden_layers=2, vocab_size=64,
+            num_attention_heads=4, num_key_value_heads=2,
+            talker_hidden_size=32, num_talker_hidden_layers=1,
+            image_hidden_size=8, image_token_len=4, spk_emb_size=4,
+            max_position_embeddings=16,
+        )
+        model = MiniMindOmni(config, audio_encoder_path=None, vision_model_path=None)
+        tokenizer = FakeTokenizer()
+        prompts = torch.tensor([[1, 3, 4, 5], [0, 0, 6, 7]])
+        prompt_mask = torch.tensor([[1, 1, 1, 1], [0, 0, 1, 1]])
+        before_mode = model.training
+        output = model.generate_text(prompts, attention_mask=prompt_mask,
+                                     max_new_tokens=2, temperature=0,
+                                     eos_token_id=2, pad_token_id=0)
+        self.assertEqual(tuple(output.shape), (2, 6))
+        self.assertTrue(torch.equal(output[:, :4], prompts))
+        self.assertEqual(model.training, before_mode)
+
+        engine = TorchRolloutEngine(model, tokenizer, temperature=0, top_p=1)
+        result = engine.rollout(prompts, prompt_mask, num_generations=2, max_new_tokens=2)
+        self.assertEqual(tuple(result.output_ids.shape), (4, 6))
+        self.assertEqual(tuple(result.per_token_logps.shape), (4, 2))
+        self.assertEqual(tuple(result.completion_mask.shape), (4, 2))
+        self.assertEqual(len(result.completions), 4)
+        self.assertFalse(result.output_ids.is_inference())
+
+    def test_sglang_result_is_padded_and_keeps_token_logprobs(self):
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return [{"meta_info": {"output_ids": [9, 2],
+                                        "output_token_logprobs": [[-0.4, 9], [-0.1, 2]]}}]
+
+        with unittest.mock.patch("requests.post", return_value=Response()) as post:
+            engine = SGLangRolloutEngine(FakeTokenizer(), "http://localhost:8998", "/tmp/shared")
+            prompt_ids = torch.tensor([[1, 3, 4]])
+            attention_mask = torch.ones_like(prompt_ids)
+            result = engine.rollout(prompt_ids, attention_mask, num_generations=1,
+                                    max_new_tokens=2, temperature=0.7)
+        self.assertEqual(tuple(result.output_ids.shape), (1, 5))
+        self.assertEqual(result.completion_mask.sum().item(), 2)
+        torch.testing.assert_close(result.per_token_logps, torch.tensor([[-0.4, -0.1]]))
+        self.assertIn("input_ids", post.call_args.kwargs["json"])
 
 
 class TestAlignmentLosses(unittest.TestCase):
@@ -136,6 +198,215 @@ class TestOmniTextTrainingSetup(unittest.TestCase):
         self.assertTrue(any(grad is not None for grad in text_grads))
         self.assertTrue(all(grad is None for grad in frozen_grads))
         self.assertIsNone(outputs.audio_logits)
+
+    def test_ppo_value_head_reads_text_hidden_states_only(self):
+        config = OmniConfig(
+            hidden_size=32, num_hidden_layers=2, vocab_size=64,
+            num_attention_heads=4, num_key_value_heads=2,
+            talker_hidden_size=32, num_talker_hidden_layers=1,
+            image_hidden_size=8, image_token_len=4, spk_emb_size=4,
+            max_position_embeddings=16,
+        )
+        critic = PPOValueModel(MiniMindOmni(config, audio_encoder_path=None, vision_model_path=None))
+        input_ids = torch.randint(0, config.vocab_size, (2, 5))
+        values, aux = critic(input_ids, torch.ones_like(input_ids))
+        self.assertEqual(tuple(values.shape), (2, 5))
+        self.assertEqual(aux.ndim, 0)
+
+
+class TestPPOLosses(unittest.TestCase):
+    def test_gae_masks_padding_and_propagates_terminal_reward(self):
+        rewards = torch.tensor([[0.0, 1.0, 0.0]])
+        values = torch.zeros_like(rewards)
+        mask = torch.tensor([[1.0, 1.0, 0.0]])
+        advantages, returns = generalized_advantage_estimate(rewards, values, mask,
+                                                               gamma=1.0, lam=1.0)
+        self.assertAlmostEqual(advantages[0, 0].item(), 0.0, places=6)
+        self.assertAlmostEqual(advantages[0, 1].item(), 0.0, places=6)
+        self.assertEqual(advantages[0, 2].item(), 0.0)
+        self.assertTrue(torch.equal(returns, torch.tensor([[1.0, 1.0, 0.0]])))
+
+    def test_ppo_clipping_and_value_losses_backpropagate(self):
+        new_logps = torch.tensor([[2.0]], requires_grad=True)
+        old_logps = torch.zeros_like(new_logps)
+        advantage = torch.ones_like(new_logps)
+        mask = torch.ones_like(new_logps)
+        policy_loss = ppo_policy_loss(new_logps, old_logps, advantage, mask, clip_epsilon=0.2)
+        values = torch.tensor([[2.0]], requires_grad=True)
+        value_loss = clipped_value_loss(values, torch.zeros_like(values), torch.ones_like(values), mask)
+        (policy_loss + value_loss).backward()
+        self.assertIsNotNone(new_logps.grad)
+        self.assertIsNotNone(values.grad)
+
+
+class TestTextDatasets(unittest.TestCase):
+    def test_sft_dataset_masks_user_and_system_tokens(self):
+        sample = {"conversations": [{"role": "user", "content": "unique-question"},
+                                     {"role": "assistant", "content": "unique-answer"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "sft.jsonl")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(sample) + "\n")
+            ids, labels = TextSFTDataset(path, FakeTokenizer(), max_length=128)[0]
+        question = torch.tensor([ord(char) + 3 for char in "unique-question"])
+        answer = torch.tensor([ord(char) + 3 for char in "unique-answer"])
+        question_pos = next(i for i in range(len(ids) - len(question))
+                            if torch.equal(ids[i:i + len(question)], question))
+        answer_pos = next(i for i in range(len(ids) - len(answer))
+                          if torch.equal(ids[i:i + len(answer)], answer))
+        self.assertTrue(torch.all(labels[question_pos:question_pos + len(question)] == -100))
+        self.assertTrue(torch.equal(labels[answer_pos:answer_pos + len(answer)], answer))
+
+
+class TestLoRA(unittest.TestCase):
+    def test_injection_is_zero_initialized_and_merge_preserves_outputs(self):
+        class Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.q_proj = torch.nn.Linear(4, 3, bias=False)
+                self.other = torch.nn.Linear(4, 3, bias=False)
+
+        block = Block()
+        inputs = torch.randn(2, 4)
+        expected = block.q_proj(inputs)
+        count = inject_lora(block, target_names=("q_proj",), rank=2, alpha=4)
+        self.assertEqual(count, 1)
+        self.assertIsInstance(block.q_proj, LoRALinear)
+        self.assertEqual(block.q_proj.lora_A.device, block.q_proj.base.weight.device)
+        torch.testing.assert_close(block.q_proj(inputs), expected)
+        self.assertFalse(block.q_proj.base.weight.requires_grad)
+        self.assertTrue(block.q_proj.lora_A.requires_grad)
+        self.assertEqual(set(lora_state_dict(block)), {"q_proj.lora_A", "q_proj.lora_B"})
+        with torch.no_grad():
+            block.q_proj.lora_B.normal_()
+        before_merge = block.q_proj(inputs)
+        merge_lora(block)
+        self.assertIsInstance(block.q_proj, torch.nn.Linear)
+        torch.testing.assert_close(block.q_proj(inputs), before_merge)
+
+
+class TestTextTrainingLosses(unittest.TestCase):
+    def test_causal_lm_loss_ignores_masked_targets(self):
+        logits = torch.zeros(1, 3, 5)
+        labels = torch.tensor([[0, 1, -100]])
+        loss = causal_lm_loss(logits, labels)
+        torch.testing.assert_close(loss, torch.log(torch.tensor(5.0)))
+
+    def test_distillation_zero_when_student_matches_teacher(self):
+        logits = torch.randn(2, 4, 7)
+        labels = torch.tensor([[1, 2, -100, -100], [3, 4, 5, -100]])
+        loss = masked_distillation_loss(logits, logits.clone(), labels, temperature=2.0)
+        self.assertAlmostEqual(loss.item(), 0.0, places=6)
+
+    def test_distillation_is_masked_and_differentiable(self):
+        student = torch.zeros(1, 3, 4, requires_grad=True)
+        teacher = torch.zeros(1, 3, 4)
+        teacher[0, 1, 1] = 8.0  # This predicts a masked target after the shift.
+        labels = torch.tensor([[-100, 2, -100]])
+        loss = masked_distillation_loss(student, teacher, labels)
+        self.assertAlmostEqual(loss.item(), 0.0, places=6)
+        loss.backward()
+        self.assertIsNotNone(student.grad)
+
+    def test_rejects_empty_targets_or_nonpositive_temperature(self):
+        logits = torch.zeros(1, 2, 3)
+        labels = torch.full((1, 2), -100)
+        with self.assertRaises(ValueError):
+            causal_lm_loss(logits, labels)
+        with self.assertRaises(ValueError):
+            masked_distillation_loss(logits, logits, labels, temperature=0)
+
+
+class TestOnlineRLLosses(unittest.TestCase):
+    def test_group_advantages_are_normalized_per_prompt(self):
+        rewards = torch.tensor([1.0, 2.0, 3.0, 9.0, 9.0, 9.0])
+        advantages = group_relative_advantages(rewards, num_generations=3)
+        self.assertAlmostEqual(advantages[:3].mean().item(), 0.0, places=6)
+        self.assertAlmostEqual(advantages[3:].abs().sum().item(), 0.0, places=6)
+        with self.assertRaises(ValueError):
+            group_relative_advantages(torch.ones(3), num_generations=2)
+
+    def test_grpo_policy_loss_is_zero_at_old_reference_policy(self):
+        logps = torch.zeros(2, 3)
+        advantages = torch.tensor([-1.0, 1.0])
+        mask = torch.ones_like(logps)
+        loss = grpo_cispo_loss(logps, logps, logps, advantages, mask)
+        self.assertAlmostEqual(loss.item(), 0.0, places=6)
+
+    def test_cispo_retains_gradient_after_ratio_clipping(self):
+        policy = torch.full((1, 2), 3.0, requires_grad=True)
+        old = torch.zeros_like(policy)
+        ref = torch.zeros_like(policy)
+        loss = grpo_cispo_loss(policy, old, ref, torch.ones(1), torch.ones_like(policy),
+                               beta=0.0, loss_type="cispo", epsilon_high=1.1)
+        loss.backward()
+        self.assertTrue(torch.all(policy.grad < 0))
+
+    def test_response_scoring_groups_samples_and_applies_heuristics(self):
+        scores = score_responses(["prompt-a", "prompt-b"], ["x", "a " * 20, "b " * 20, "z"])
+        self.assertEqual(tuple(scores.shape), (4,))
+        self.assertGreater(scores[1].item(), scores[0].item())
+
+
+class TestAgentTools(unittest.TestCase):
+    def test_safe_math_and_tool_dispatch(self):
+        self.assertEqual(safe_math_eval("2 + 3 * 4"), 14)
+        self.assertEqual(execute_tool("calculate_math", {"expression": "7 * 8"}), {"result": "56"})
+        with self.assertRaises(ValueError):
+            safe_math_eval("__import__('os').system('false')")
+        self.assertIsNone(execute_tool("calculate_math", {"expression": "1 / 0"}))
+
+    def test_tool_calls_parse_and_reward_against_ground_truth(self):
+        text = '<tool_call>{"name":"calculate_math","arguments":{"expression":"3+4"}}</tool_call>'
+        calls = parse_tool_calls(text)
+        self.assertEqual(calls[0]["name"], "calculate_math")
+        tools = [{"type": "function", "function": {"name": "calculate_math"}}]
+        reward = calculate_agent_reward("The answer is 7.", [text, "The answer is 7."],
+                                        tools, ["7"])
+        self.assertGreater(reward, 2.0)
+
+    def test_invalid_tool_call_gets_no_ground_truth_credit(self):
+        text = '<tool_call>{"name":"missing","arguments":{}}</tool_call>'
+        tools = [{"type": "function", "function": {"name": "calculate_math"}}]
+        reward = calculate_agent_reward("The answer is 8.", [text], tools, ["7"])
+        self.assertLess(reward, 0.0)
+
+
+class TestTokenizerTraining(unittest.TestCase):
+    def test_reads_pretrain_and_conversation_jsonl(self):
+        rows = [{"text": "small pretraining text"},
+                {"conversations": [{"role": "user", "content": "question"},
+                                   {"role": "assistant", "content": "answer"}]}]
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "data.jsonl")
+            with open(path, "w", encoding="utf-8") as stream:
+                for row in rows:
+                    stream.write(json.dumps(row) + "\n")
+            self.assertEqual(list(get_texts(path, max_lines=1)), ["small pretraining text"])
+            self.assertEqual(len(list(get_texts(path))), 2)
+
+    def test_rejects_empty_data_and_saves_loadable_tokenizer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            empty_path = os.path.join(directory, "empty.jsonl")
+            with open(empty_path, "w", encoding="utf-8") as stream:
+                stream.write("{}\n")
+            with self.assertRaisesRegex(ValueError, "没有可用文本"):
+                list(get_texts(empty_path))
+
+            data_path = os.path.join(directory, "data.jsonl")
+            with open(data_path, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps({"text": "MiniMind tokenizer test data for BPE."}) + "\n")
+                stream.write(json.dumps({"text": "测试分词器训练与加载。"}) + "\n")
+            output_dir = os.path.join(directory, "tokenizer")
+            train_tokenizer(data_path, output_dir, vocab_size=300, max_lines=2)
+            self.assertTrue(os.path.exists(os.path.join(output_dir, "tokenizer.json")))
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(output_dir)
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": "hello"},
+                 {"role": "assistant", "content": "hi"}], tokenize=False
+            )
+            self.assertIn("<|im_start|>user", prompt)
 
 
 if __name__ == "__main__":

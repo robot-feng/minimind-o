@@ -1,9 +1,12 @@
 """Small text preference dataset used by DPO-style MiniMind-O trainers."""
 
 import json
+import random
 
 import torch
 from torch.utils.data import Dataset
+
+from dataset.text_dataset import postprocess_chat_prompt
 
 
 class PreferenceDataset(Dataset):
@@ -34,7 +37,7 @@ class PreferenceDataset(Dataset):
         encoded = self.tokenizer(text, add_special_tokens=False)
         return encoded.input_ids if hasattr(encoded, "input_ids") else encoded["input_ids"]
 
-    def _render(self, messages):
+    def _render(self, messages, remove_empty_think=None):
         messages = [dict(message) for message in messages]
         tools = None
         for message in messages:
@@ -44,9 +47,10 @@ class PreferenceDataset(Dataset):
                     tools = json.loads(tools)
             if isinstance(message.get("tool_calls"), str):
                 message["tool_calls"] = json.loads(message["tool_calls"])
-        return self.tokenizer.apply_chat_template(
+        prompt = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=False, tools=tools
         )
+        return postprocess_chat_prompt(prompt, remove_empty_think=remove_empty_think)
 
     def _loss_mask(self, ids):
         mask = [0] * len(ids)
@@ -64,8 +68,8 @@ class PreferenceDataset(Dataset):
                 i += 1
         return mask
 
-    def _encode_branch(self, messages):
-        ids = self._encode(self._render(messages))[:self.max_length]
+    def _encode_branch(self, messages, remove_empty_think=None):
+        ids = self._encode(self._render(messages, remove_empty_think))[:self.max_length]
         mask = self._loss_mask(ids)
         if not any(mask):
             raise ValueError("DPO conversation has no assistant response tokens; check tokenizer chat template")
@@ -75,8 +79,9 @@ class PreferenceDataset(Dataset):
 
     def __getitem__(self, index):
         sample = self.samples[index]
-        chosen_ids, chosen_mask = self._encode_branch(sample["chosen"])
-        rejected_ids, rejected_mask = self._encode_branch(sample["rejected"])
+        remove_empty_think = random.random() > 0.2
+        chosen_ids, chosen_mask = self._encode_branch(sample["chosen"], remove_empty_think)
+        rejected_ids, rejected_mask = self._encode_branch(sample["rejected"], remove_empty_think)
         return {
             "x_chosen": chosen_ids[:-1],
             "y_chosen": chosen_ids[1:],

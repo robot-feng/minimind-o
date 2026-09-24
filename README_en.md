@@ -338,6 +338,52 @@ The training entry point is `train_sft_omni.py`, and the recommended pipeline ca
 
 Among training modes, `all` updates MiniMind / Talker / projectors, while `audio_proj` and `vision_proj` are used solely to align the corresponding projector. SenseVoice-Small, TIPSv2 and Mimi are kept frozen throughout. The Dense and MoE variants share the same data ordering. The mini commands are meant only to make the pipeline runnable end-to-end and finish in ~2 hours on a single RTX 3090 by default; the released weights correspond to full training.
 
+### MiniMind training capabilities in MiniMind-O
+
+The language-model training capabilities from `minimind/trainer` have been adapted under the root `trainer/` directory to use MiniMind-O's model, tokenizer and checkpoint formats. Text pretraining, text SFT, LoRA, distillation and preference/RL currently train only the Thinker text path. Multimodal audio, image and video supervision remains in `train_sft_omni.py` above.
+
+| Capability | MiniMind-O entry point | Data / notes |
+|---|---|---|
+| Text pretraining | `trainer/train_pretrain.py` | `pretrain_t2t_mini.jsonl`, reads the `text` field |
+| Full text SFT | `trainer/train_full_sft.py` | Multi-turn `conversations` JSONL; assistant replies are supervised |
+| LoRA fine-tuning / merge | `trainer/train_lora.py` | Multi-turn `conversations` JSONL; `--merge_lora` exports merged weights |
+| White-box distillation | `trainer/train_distillation.py` | CE plus temperature-scaled KL on student and teacher logits |
+| DPO | `trainer/train_dpo_omni.py` | `dpo.jsonl` with `chosen` and `rejected` conversations per row |
+| PPO | `trainer/train_ppo.py` | `rlaif.jsonl` prompts; online sampling with an Actor and Critic |
+| GRPO / CISPO | `trainer/train_grpo.py` | `rlaif.jsonl` prompts; select the objective with `--loss_type` |
+| Multi-turn Agentic RL | `trainer/train_agent.py` | `agent_rl.jsonl`; reward is computed after local tool interaction |
+| Tokenizer training | `trainer/train_tokenizer.py` | Train a ByteLevel BPE tokenizer from JSONL text |
+
+Run the examples below from the repository root. `--batch_size` is per process in multi-GPU runs; change `--nproc_per_node 4` to `1` for one GPU. Adjust data paths, weight names and model sizes for files available locally:
+
+```bash
+cd trainer
+
+# Text pretraining and full SFT
+torchrun --standalone --nproc_per_node 4 train_pretrain.py --data_path ../dataset/pretrain_t2t_mini.jsonl
+torchrun --standalone --nproc_per_node 4 train_full_sft.py --data_path ../dataset/sft_t2t_mini.jsonl
+
+# LoRA; --merge_lora also exports a full merged checkpoint
+torchrun --standalone --nproc_per_node 4 train_lora.py --data_path ../dataset/sft_t2t_mini.jsonl --merge_lora
+
+# White-box distillation; the teacher checkpoint must exist under out/
+torchrun --standalone --nproc_per_node 4 train_distillation.py \
+  --data_path ../dataset/sft_t2t_mini.jsonl --teacher_weight full_sft
+
+# Choose either GRPO or CISPO, and run PPO
+torchrun --standalone --nproc_per_node 4 train_grpo.py --data_path ../dataset/rlaif.jsonl --loss_type grpo
+torchrun --standalone --nproc_per_node 4 train_grpo.py --data_path ../dataset/rlaif.jsonl --loss_type cispo
+torchrun --standalone --nproc_per_node 4 train_ppo.py --data_path ../dataset/rlaif.jsonl
+
+# Multi-turn tool-use Agent RL
+torchrun --standalone --nproc_per_node 4 train_agent.py --data_path ../dataset/agent_rl.jsonl
+
+# Optional tokenizer training; --max_lines limits the number of input rows
+python train_tokenizer.py --data_path ../dataset/pretrain_t2t_mini.jsonl --tokenizer_dir ../out/tokenizer
+```
+
+RL entry points use native PyTorch rollout by default. `train_grpo.py`, `train_ppo.py` and `train_agent.py` also expose an SGLang HTTP backend with `--rollout_engine sglang`; it requires a separate SGLang service compatible with MiniMind-O and a checkpoint directory shared by the service and training process. Agent RL currently includes local arithmetic, time and unit-conversion tools plus verifiable-reward examples; it does not provide web search or a production tool sandbox.
+
 ### Text preference alignment (DPO)
 
 `trainer/train_dpo_omni.py` uses MiniMind-O weights and checkpoints, and reads MiniMind-style `dpo.jsonl` rows containing `chosen` and `rejected` message lists. This entry point updates the text backbone and vocabulary head while keeping the audio and vision paths frozen; multimodal supervision remains in `train_sft_omni.py`.

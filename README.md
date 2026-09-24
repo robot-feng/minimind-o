@@ -337,6 +337,52 @@ full 数据集与发布的 `minimind-3o` / `minimind-3o-moe` 权重对应，覆�
 
 训练模式里，`all` 会更新 MiniMind / Talker / projector，`audio_proj` 和 `vision_proj` 只用于单独对齐对应投影层；SenseVoice-Small、TIPSv2 和 Mimi 始终冻结。Dense 与 MoE 版本沿用同一套数据顺序。mini 命令只用于快速跑通链路，默认单卡 3090 约 2 小时完成；发布权重对应 full 数据训练。
 
+### MiniMind 训练能力在 MiniMind-O 中的对应入口
+
+`minimind/trainer` 中与语言模型训练相关的能力，已适配到根仓库 `trainer/`，并使用 MiniMind-O 的模型、tokenizer 与 checkpoint 格式。文本预训练、文本 SFT、LoRA、蒸馏和偏好/RL 入口目前只训练 Thinker 文本路径；音频、图像、视频的多模态监督仍通过上面的 `train_sft_omni.py` 完成。
+
+| 能力 | MiniMind-O 入口 | 数据文件 / 说明 |
+|---|---|---|
+| 文本预训练 | `trainer/train_pretrain.py` | `pretrain_t2t_mini.jsonl`，读取 `text` 字段 |
+| 文本全量 SFT | `trainer/train_full_sft.py` | 多轮 `conversations` JSONL，只监督 assistant 回复 |
+| LoRA 微调 / 合并 | `trainer/train_lora.py` | 多轮 `conversations` JSONL；可用 `--merge_lora` 导出合并权重 |
+| 白盒知识蒸馏 | `trainer/train_distillation.py` | 学生与教师对同一文本序列做 CE + 温度 KL |
+| DPO | `trainer/train_dpo_omni.py` | `dpo.jsonl`，每行包含 `chosen`、`rejected` 对话 |
+| PPO | `trainer/train_ppo.py` | `rlaif.jsonl` prompt，在线采样并训练 Actor / Critic |
+| GRPO / CISPO | `trainer/train_grpo.py` | `rlaif.jsonl` prompt，可通过 `--loss_type` 选择目标 |
+| 多轮 Agentic RL | `trainer/train_agent.py` | `agent_rl.jsonl`，在本地工具交互后按整轮结果计算奖励 |
+| tokenizer 训练 | `trainer/train_tokenizer.py` | 从 JSONL 文本训练 ByteLevel BPE tokenizer |
+
+从仓库根目录执行以下示例。多卡时 `--batch_size` 是每个进程的 batch；单卡可将 `--nproc_per_node 4` 改为 `1`。各阶段的数据路径、权重名和模型尺寸都可按本地文件调整：
+
+```bash
+cd trainer
+
+# 文本预训练与全量 SFT
+torchrun --standalone --nproc_per_node 4 train_pretrain.py --data_path ../dataset/pretrain_t2t_mini.jsonl
+torchrun --standalone --nproc_per_node 4 train_full_sft.py --data_path ../dataset/sft_t2t_mini.jsonl
+
+# LoRA；--merge_lora 会额外导出合并后的完整权重
+torchrun --standalone --nproc_per_node 4 train_lora.py --data_path ../dataset/sft_t2t_mini.jsonl --merge_lora
+
+# 白盒蒸馏：学生默认从 sft_zero 初始化，教师权重需已存在于 out/
+torchrun --standalone --nproc_per_node 4 train_distillation.py \
+  --data_path ../dataset/sft_t2t_mini.jsonl --teacher_weight full_sft
+
+# GRPO / CISPO（二选一）以及 PPO
+torchrun --standalone --nproc_per_node 4 train_grpo.py --data_path ../dataset/rlaif.jsonl --loss_type grpo
+torchrun --standalone --nproc_per_node 4 train_grpo.py --data_path ../dataset/rlaif.jsonl --loss_type cispo
+torchrun --standalone --nproc_per_node 4 train_ppo.py --data_path ../dataset/rlaif.jsonl
+
+# 多轮工具使用 Agent RL
+torchrun --standalone --nproc_per_node 4 train_agent.py --data_path ../dataset/agent_rl.jsonl
+
+# 可选：训练 tokenizer；默认读取完整数据，--max_lines 可限制样本数
+python train_tokenizer.py --data_path ../dataset/pretrain_t2t_mini.jsonl --tokenizer_dir ../out/tokenizer
+```
+
+RL 入口默认使用 PyTorch 原生 rollout。`train_grpo.py`、`train_ppo.py` 和 `train_agent.py` 也提供 SGLang HTTP rollout 选项（`--rollout_engine sglang`）；需要单独启动兼容 MiniMind-O 的 SGLang 服务，并确保训练进程与服务可以访问同一个 checkpoint 目录。Agent RL 当前提供的是便于复现的本地算术、时间、单位换算等工具和可验证奖励示例，不包含联网搜索或生产级工具沙箱。
+
 ### 4' 文本偏好对齐（DPO）
 
 `trainer/train_dpo_omni.py` 使用 MiniMind-O 权重和 checkpoint，读取 MiniMind 格式的 `dpo.jsonl`（每条样本包含 `chosen`、`rejected` 两组对话）。当前 DPO 入口训练文本主干与词表头；音频、图像分支保持冻结，多模态监督仍走 `train_sft_omni.py`。
