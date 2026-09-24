@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from trainer.rl_utils import heuristic_response_reward, repetition_penalty
+from trainer.rl_utils import repetition_penalty
 
 
 def safe_math_eval(expression):
@@ -113,11 +113,22 @@ def validate_gt_in_text(text, ground_truth):
 
 
 def calculate_agent_reward(final_text, turn_texts, tools, ground_truth, unfinished=False, reward_model=None, prompt=""):
-    calls = [call for text in turn_texts for call in parse_tool_calls(text)]
+    turn_answers = [text.split("</think>", 1)[-1].strip() for text in (turn_texts or [final_text])]
+    tag_penalty = 0.5 * sum(
+        abs(text.count("<tool_call>") - text.count("</tool_call>")) for text in turn_answers
+    )
+    calls = [call for text in turn_answers for call in parse_tool_calls(text)]
     if not calls:
-        reward = heuristic_response_reward(final_text)
+        answer = final_text
+        reward = -tag_penalty + (0.5 if 5 <= len(final_text.strip()) <= 800 else -0.5)
+        if "</think>" in final_text:
+            thinking, answer = final_text.split("</think>", 1)
+            reward += 1.0 if 20 <= len(thinking.strip()) <= 300 else -0.5
+            reward += 0.25 if final_text.count("</think>") == 1 else -0.25
+            answer = answer.strip()
         if reward_model:
-            reward += reward_model.score(prompt, final_text)
+            reward += reward_model.score(prompt, answer)
+        reward -= repetition_penalty(answer)
         return max(min(reward, 3.0), -3.0)
 
     valid_names = tool_names(tools)
@@ -136,8 +147,9 @@ def calculate_agent_reward(final_text, turn_texts, tools, ground_truth, unfinish
                     "translate_text": ("text", "target_language")}.get(name, None)
         valid_calls += int(name in valid_names and required is not None and all(args.get(key) is not None for key in required))
     gap = abs(valid_calls - len(ground_truth or [])) + max(0, len(calls) - valid_calls)
-    reward = 0.5 if gap == 0 else -0.5 * gap
-    final_answer = "" if unfinished else (final_text.split("</tool_call>")[-1].strip() or final_text)
+    reward = -tag_penalty + (0.5 if gap == 0 else -0.5 * gap)
+    answer = turn_answers[-1] if turn_answers else final_text.strip()
+    final_answer = "" if unfinished else (answer.split("</tool_call>")[-1].strip() or answer)
     if ground_truth:
         reward += 2.5 * len(validate_gt_in_text(final_answer, ground_truth)) / len(ground_truth)
     if unfinished:

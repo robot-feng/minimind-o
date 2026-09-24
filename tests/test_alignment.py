@@ -487,6 +487,31 @@ class TestAgentTools(unittest.TestCase):
         reward = calculate_agent_reward("The answer is 8.", [text], tools, ["7"])
         self.assertLess(reward, 0.0)
 
+    def test_agent_plain_answer_uses_reference_minimum_length(self):
+        self.assertEqual(calculate_agent_reward("Short answer.", ["Short answer."], [], []), 0.5)
+
+    def test_agent_reward_penalizes_unbalanced_tool_tags_on_every_turn(self):
+        malformed = "This is a reasonable answer.<tool_call>"
+        self.assertEqual(calculate_agent_reward(malformed, [malformed], [], []), 0.0)
+
+        call = '<tool_call>{"name":"calculate_math","arguments":{"expression":"6 * 7"}}</tool_call>'
+        unbalanced = call + "<tool_call> result 42"
+        tools = [{"type": "function", "function": {"name": "calculate_math"}}]
+        self.assertAlmostEqual(calculate_agent_reward(unbalanced, [unbalanced], tools, ["42"]), 2.5)
+
+    def test_agent_reward_model_scores_answer_after_thinking(self):
+        class RewardModel:
+            response = None
+
+            def score(self, prompt, response):
+                self.response = response
+                return 0.0
+
+        text = "This is a sufficiently detailed chain of thought for the format check.</think>short"
+        reward_model = RewardModel()
+        calculate_agent_reward(text, [text], [], [], reward_model=reward_model, prompt="question")
+        self.assertEqual(reward_model.response, "short")
+
     def test_agent_rollout_executes_tool_and_resumes_conversation(self):
         class Encoding:
             def __init__(self, input_ids):
