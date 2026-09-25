@@ -57,6 +57,45 @@ class TestFullTrainingPipeline(unittest.TestCase):
         self.assertIn("--vision_dir google/tipsv2-b14", commands[-1])
         self.assertIn("Dry run complete; no training was started.", result.stdout)
 
+    def test_dry_run_uses_conda_torchrun_when_shell_has_no_torchrun(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            temp = Path(temporary_dir)
+            dataset_dir = temp / "dataset"
+            dataset_dir.mkdir()
+            for name in DATA_FILES:
+                (dataset_dir / name).write_bytes(b"placeholder")
+
+            conda = temp / "bin" / "conda"
+            conda.parent.mkdir()
+            conda.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+            conda.chmod(0o755)
+
+            env = os.environ.copy()
+            env.update(
+                CONDA_EXE=str(conda),
+                DATASET_DIR=str(dataset_dir),
+                DRY_RUN="1",
+                LOG_FILE=str(temp / "pipeline.log"),
+                PATH=f"{conda.parent}:/usr/bin:/bin",
+            )
+            result = subprocess.run(
+                ["/bin/bash", str(SCRIPT)],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = [line for line in result.stdout.splitlines() if line.startswith("[dry-run]")]
+        self.assertEqual(len(commands), len(STAGES), result.stdout)
+        self.assertTrue(
+            all(f"{conda} run --no-capture-output -n minimind torchrun" in command
+                for command in commands),
+            result.stdout,
+        )
+
     def test_missing_full_dataset_fails_before_training(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             env = os.environ.copy()
