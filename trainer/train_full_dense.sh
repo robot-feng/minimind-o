@@ -9,8 +9,24 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 MASTER_PORT="${MASTER_PORT:-29560}"
 VISION_DIR="${VISION_DIR:-google/tipsv2-b14}"
 LOG_FILE="${LOG_FILE:-../out/sft_full_dense.log}"
+CONDA_ENV="${CONDA_ENV:-minimind}"
 mkdir -p "$(dirname "$LOG_FILE")"
 exec > >(tee -a "$LOG_FILE") 2>&1
+
+# systemd services do not inherit the interactive shell's activated conda env.
+if command -v torchrun >/dev/null 2>&1; then
+    TORCHRUN=(torchrun)
+else
+    CONDA_EXE="${CONDA_EXE:-$(command -v conda || true)}"
+    if [[ -z "$CONDA_EXE" && -x /data/miniconda3/bin/conda ]]; then
+        CONDA_EXE=/data/miniconda3/bin/conda
+    fi
+    if [[ -z "$CONDA_EXE" || ! -x "$CONDA_EXE" ]]; then
+        echo "torchrun not found and conda executable unavailable" >&2
+        exit 127
+    fi
+    TORCHRUN=("$CONDA_EXE" run --no-capture-output -n "$CONDA_ENV" torchrun)
+fi
 
 declare -A expected_sha256=(
     [sft_t2a.parquet]=2e5eb373e8853109f7d2d4e032a2a6e47088cd61873af0896e9fc32d1464597e
@@ -46,7 +62,7 @@ run_stage() {
     local save_weight="$1" from_weight="$2" data_file="$3"
     local epochs="$4" learning_rate="$5" mode="$6" use_compile="$7" max_seq_len="$8"
     local -a command=(
-        torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT"
+        "${TORCHRUN[@]}" --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT"
         train_sft_omni.py
         --learning_rate "$learning_rate" --data_path "$DATASET_DIR/$data_file"
         --epochs "$epochs" --batch_size "$BATCH_SIZE" --use_compile "$use_compile"
