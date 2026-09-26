@@ -380,12 +380,11 @@ HF_ENDPOINT=https://huggingface.co hf download jingyaogong/minimind-o_dataset \
 
 ```bash
 python dataset/prepare_i2t_subset.py --input dataset/sft_i2t.parquet --output dataset/sft_i2t_mini.parquet --max_samples 10000 --seed 42
-cd trainer
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --vision_only --mode vision_proj --data_path ../dataset/sft_i2t_mini.parquet --from_weight sft_full_a2a --save_weight sft_i2t_mini_proj --epochs 1 --batch_size 2 --accumulation_steps 2 --learning_rate 5e-5 --max_seq_len 768 --use_compile 0
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --vision_only --mode all --data_path ../dataset/sft_i2t_mini.parquet --from_weight sft_i2t_mini_proj --save_weight sft_i2t_mini --epochs 1 --batch_size 2 --accumulation_steps 4 --learning_rate 5e-6 --max_seq_len 768 --use_compile 0
+DRY_RUN=1 NPROC_PER_NODE=4 bash trainer/train_i2t_eval.sh
+CUDA_VISIBLE_DEVICES=0,1,2,3 NPROC_PER_NODE=4 bash trainer/train_i2t_eval.sh
 ```
 
-`--vision_only` 只运行 Thinker 的图像到文本路径，不加载 SenseVoice，也不计算 Talker 音频损失。要比较微调前后的结果，用相同的 9 张图片、提示和生成参数分别评测：
+`train_i2t_eval.sh` 顺序运行 projector 对齐和 Thinker 微调，然后用相同的 9 张图片与生成参数评测基线/新权重并打印逐图对比。`--vision_only` 只运行 Thinker 图像到文本路径，不加载 SenseVoice，也不计算 Talker 音频损失。也可以设置 `DATA_PATH`、`NPROC_PER_NODE`、`PROJ_BATCH_SIZE` 等环境变量调整数据和并行配置。手动评测命令如下：
 
 ```bash
 python eval_omni.py --weight sft_full_a2a --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_full_a2a.jsonl

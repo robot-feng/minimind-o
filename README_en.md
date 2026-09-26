@@ -383,12 +383,11 @@ If you have completed A2A training and want a smaller visual fine-tuning run, cr
 
 ```bash
 python dataset/prepare_i2t_subset.py --input dataset/sft_i2t.parquet --output dataset/sft_i2t_mini.parquet --max_samples 10000 --seed 42
-cd trainer
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --vision_only --mode vision_proj --data_path ../dataset/sft_i2t_mini.parquet --from_weight sft_full_a2a --save_weight sft_i2t_mini_proj --epochs 1 --batch_size 2 --accumulation_steps 2 --learning_rate 5e-5 --max_seq_len 768 --use_compile 0
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --vision_only --mode all --data_path ../dataset/sft_i2t_mini.parquet --from_weight sft_i2t_mini_proj --save_weight sft_i2t_mini --epochs 1 --batch_size 2 --accumulation_steps 4 --learning_rate 5e-6 --max_seq_len 768 --use_compile 0
+DRY_RUN=1 NPROC_PER_NODE=4 bash trainer/train_i2t_eval.sh
+CUDA_VISIBLE_DEVICES=0,1,2,3 NPROC_PER_NODE=4 bash trainer/train_i2t_eval.sh
 ```
 
-`--vision_only` runs only the Thinker image-to-text path: it skips SenseVoice loading and the Talker audio loss. Compare the before/after checkpoints on the same 9 images with identical prompts and generation settings:
+`train_i2t_eval.sh` runs projector alignment followed by Thinker fine-tuning, then evaluates both checkpoints on the same 9 images and prints a per-image comparison. `--vision_only` runs only the Thinker image-to-text path: it skips SenseVoice loading and the Talker audio loss. Set `DATA_PATH`, `NPROC_PER_NODE`, `PROJ_BATCH_SIZE` and related environment variables to adjust the data and parallelism. Manual evaluation commands:
 
 ```bash
 python eval_omni.py --weight sft_full_a2a --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_full_a2a.jsonl

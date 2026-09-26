@@ -20,6 +20,27 @@ STAGES = (
 
 
 class TestFullTrainingPipeline(unittest.TestCase):
+    def test_i2t_dry_run_includes_training_and_post_training_comparison(self):
+        script = ROOT / "trainer" / "train_i2t_eval.sh"
+        env = os.environ.copy()
+        env.update(DRY_RUN="1", NPROC_PER_NODE="4")
+        result = subprocess.run(
+            ["bash", str(script)], cwd=ROOT, env=env,
+            capture_output=True, text=True, timeout=30,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = [line for line in result.stdout.splitlines() if line.startswith("[dry-run]")]
+        self.assertEqual(len(commands), 5, result.stdout)
+        self.assertIn("--mode vision_proj", commands[0])
+        self.assertIn("--from_weight sft_full_a2a", commands[0])
+        self.assertIn("--mode all", commands[1])
+        self.assertIn("--from_weight sft_i2t_mini_proj", commands[1])
+        self.assertIn("--weight sft_full_a2a", commands[2])
+        self.assertIn("--weight sft_i2t_mini", commands[3])
+        self.assertIn("--compare", commands[4])
+        self.assertIn("sft_i2t_mini.jsonl", commands[4])
+
     def test_dry_run_plans_resumable_dense_pipeline(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             temp = Path(temporary_dir)
