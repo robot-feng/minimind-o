@@ -323,6 +323,31 @@ class TestTIPSv2Checkpoint(unittest.TestCase):
         features = model.get_image_embeddings({"pixel_values": video})
         self.assertEqual(tuple(features.shape), (1, 3, 64, 768))
 
+    def test_real_checkpoint_conditions_thinker_logits_on_image_content(self):
+        config = OmniConfig(
+            hidden_size=32, num_hidden_layers=2, vocab_size=64,
+            num_attention_heads=4, num_key_value_heads=2, intermediate_size=64,
+            talker_hidden_size=32, num_talker_hidden_layers=1,
+            image_hidden_size=768, image_token_len=64,
+            max_position_embeddings=256,
+        )
+        model = MiniMindOmni(config, audio_encoder_path=None, vision_model_path=None).eval()
+        object.__setattr__(model, "vision_encoder", self.encoder)
+        images = [Image.new("RGB", (80, 52), color) for color in ((50, 140, 210), (210, 70, 40))]
+        pixels = torch.cat([self.processor(images=image)["pixel_values"] for image in images])
+        input_ids = torch.tensor([[1] + [config.image_ids[0]] * config.image_token_len + [3]]).expand(2, -1)
+
+        with torch.inference_mode():
+            image_features = model.get_image_embeddings({"pixel_values": pixels})
+            image_logits = model(
+                input_ids, pixel_values={"pixel_values": pixels}, text_only=True, logits_to_keep=1
+            ).logits[:, -1]
+            no_image_logits = model(input_ids, text_only=True, logits_to_keep=1).logits[:, -1]
+
+        self.assertFalse(torch.allclose(image_features[0], image_features[1]))
+        self.assertFalse(torch.allclose(image_logits[0], image_logits[1]))
+        self.assertFalse(torch.allclose(image_logits[0], no_image_logits[0]))
+
     def test_real_checkpoint_reaches_thinker_for_image_and_video_inputs(self):
         config = OmniConfig(
             hidden_size=32, num_hidden_layers=2, vocab_size=64,
