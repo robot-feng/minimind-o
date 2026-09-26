@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import torch
 
-from trainer.trainer_utils import get_epoch_sampler, omni_checkpoint, rescale_resume_step
+from trainer.trainer_utils import get_accumulation_window_size, get_epoch_sampler, get_optimizer_step, omni_checkpoint, rescale_resume_step
 
 
 class TestResumeStepScaling(unittest.TestCase):
@@ -32,6 +32,30 @@ class TestResumeStepScaling(unittest.TestCase):
 
 
 class TestTrainingSupport(unittest.TestCase):
+    def test_optimizer_schedule_counts_accumulation_updates(self):
+        self.assertEqual(get_optimizer_step(0, 1, 10, 4), 1)
+        self.assertEqual(get_optimizer_step(0, 4, 10, 4), 1)
+        self.assertEqual(get_optimizer_step(0, 5, 10, 4), 2)
+        self.assertEqual(get_optimizer_step(1, 1, 10, 4), 4)
+
+    def test_optimizer_schedule_handles_partial_final_accumulation(self):
+        self.assertEqual(get_optimizer_step(0, 9, 10, 4), 3)
+        self.assertEqual(get_optimizer_step(0, 10, 10, 4), 3)
+
+    def test_optimizer_schedule_rejects_zero_accumulation(self):
+        with self.assertRaises(ValueError):
+            get_optimizer_step(0, 1, 10, 0)
+
+    def test_accumulation_window_normalizes_short_final_group(self):
+        self.assertEqual(get_accumulation_window_size(1, 10, 4), 4)
+        self.assertEqual(get_accumulation_window_size(8, 10, 4), 4)
+        self.assertEqual(get_accumulation_window_size(9, 10, 4), 2)
+        self.assertEqual(get_accumulation_window_size(10, 10, 4), 2)
+
+    def test_accumulation_window_rejects_out_of_range_batch(self):
+        with self.assertRaises(ValueError):
+            get_accumulation_window_size(0, 10, 4)
+
     def test_single_rank_sampler_shuffles_deterministically_per_epoch(self):
         dataset = list(range(16))
         epoch_zero = get_epoch_sampler(dataset, 0)

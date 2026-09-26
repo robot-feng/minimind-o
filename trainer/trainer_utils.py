@@ -28,6 +28,25 @@ def get_lr(current_step, total_steps, lr):
     return lr * (0.1 + 0.45 * (1 + math.cos(math.pi * current_step / total_steps)))
 
 
+def get_optimizer_step(epoch, batch_step, batches_per_epoch, accumulation_steps):
+    """Map a microbatch position to the accumulated optimizer-step schedule."""
+    if accumulation_steps < 1:
+        raise ValueError("accumulation_steps must be at least 1")
+    updates_per_epoch = (batches_per_epoch + accumulation_steps - 1) // accumulation_steps
+    updates_in_epoch = (batch_step + accumulation_steps - 1) // accumulation_steps
+    return epoch * updates_per_epoch + updates_in_epoch
+
+
+def get_accumulation_window_size(batch_step, batches_per_epoch, accumulation_steps):
+    """Return the number of microbatches in this update, including a short tail."""
+    if accumulation_steps < 1:
+        raise ValueError("accumulation_steps must be at least 1")
+    if batch_step < 1 or batch_step > batches_per_epoch:
+        raise ValueError("batch_step must be within the current epoch")
+    window_start = ((batch_step - 1) // accumulation_steps) * accumulation_steps
+    return min(accumulation_steps, batches_per_epoch - window_start)
+
+
 def init_distributed_mode():
     if int(os.environ.get("RANK", -1)) == -1:
         return 0  # 非DDP模式

@@ -54,6 +54,11 @@ class TestFullTrainingPipeline(unittest.TestCase):
                 self.assertIn("--from_resume 1", command)
                 self.assertIn("--use_moe 0", command)
                 self.assertIn("--nproc_per_node 4", command)
+                self.assertIn("--accumulation_steps", command)
+        self.assertIn("--batch_size 8 --accumulation_steps 4", commands[2])
+        self.assertIn("--batch_size 8 --accumulation_steps 4", commands[5])
+        for index in (0, 1, 3, 4, 6):
+            self.assertIn("--batch_size 32 --accumulation_steps 1", commands[index])
         self.assertIn("--vision_dir google/tipsv2-b14", commands[-1])
         self.assertIn("Dry run complete; no training was started.", result.stdout)
 

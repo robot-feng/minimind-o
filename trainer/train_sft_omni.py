@@ -17,7 +17,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from model.model_omni import OmniConfig
 from dataset.omni_dataset import OmniDataset
-from trainer.trainer_utils import get_lr, Logger, is_main_process, init_distributed_mode, setup_seed, init_omni_model, omni_checkpoint, SkipBatchSampler, log_model_params
+from trainer.trainer_utils import get_lr, get_optimizer_step, get_accumulation_window_size, Logger, is_main_process, init_distributed_mode, setup_seed, init_omni_model, omni_checkpoint, SkipBatchSampler, log_model_params
 
 warnings.filterwarnings('ignore')
 
@@ -51,7 +51,8 @@ def omni_collate_fn(batch):
 
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
     start_time = time.time()
-    last_step = start_step
+    next_save_step = ((start_step // args.save_interval) + 1) * args.save_interval
+    optimizer_steps_per_epoch = (iters + args.accumulation_steps - 1) // args.accumulation_steps
     for step, (input_ids, labels, audio_labels, audio_inputs, audio_lens, pixel_values, spk_emb) in enumerate(loader, start=start_step + 1):
         input_ids = input_ids.to(args.device)
         labels = labels.to(args.device)
@@ -65,8 +66,8 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             else:
                 pixel_values = pixel_values.to(args.device)
         spk_emb = spk_emb.to(args.device)
-        last_step = step
-        lr = get_lr(epoch * iters + step, args.epochs * iters, args.learning_rate)
+        optimizer_step = get_optimizer_step(epoch, step, iters, args.accumulation_steps)
+        lr = get_lr(optimizer_step, args.epochs * optimizer_steps_per_epoch, args.learning_rate)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
@@ -93,10 +94,14 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
                     audio_loss = audio_loss + weighted_loss.sum() / (msum + 1e-9)
             audio_loss = audio_loss / 8 
             
-            loss = (text_loss + audio_loss + res.aux_loss) / args.accumulation_steps
+            accumulation_window_size = get_accumulation_window_size(
+                step, iters, args.accumulation_steps
+            )
+            loss = (text_loss + audio_loss + res.aux_loss) / accumulation_window_size
 
         scaler.scale(loss).backward()
-        if step % args.accumulation_steps == 0:
+        should_step = step % args.accumulation_steps == 0 or step == iters
+        if should_step:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             scaler.step(optimizer)
@@ -115,7 +120,8 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
                 wandb.log({"loss": current_loss, "text_loss": text_loss_val, 
                           "audio_loss": audio_loss_val, "lr": current_lr, "epoch_time": eta_min})
 
-        if (step % args.save_interval == 0 or step == iters) and is_main_process():
+        should_save = step == iters or (step >= next_save_step and should_step)
+        if should_save and is_main_process():
             model.eval()
             moe_suffix = '_moe' if omni_config.use_moe else ''
             ckp = f'{args.save_dir}/{args.save_weight}_{omni_config.hidden_size}{moe_suffix}.pth'
@@ -123,20 +129,15 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             raw_model = getattr(raw_model, '_orig_mod', raw_model)
             clean_state_dict = {k: v for k, v in raw_model.state_dict().items() if not k.startswith('audio_encoder.')}
             torch.save({k: v.half().cpu() for k, v in clean_state_dict.items()}, ckp)
-            omni_checkpoint(omni_config, weight=args.save_weight, model=model, optimizer=optimizer, 
+            omni_checkpoint(omni_config, weight=args.save_weight, model=model, optimizer=optimizer,
                           epoch=epoch, step=step, wandb=wandb, save_dir='../checkpoints',
-                          batch_size=args.batch_size, scaler=scaler)
+                          batch_size=args.batch_size, accumulation_steps=args.accumulation_steps,
+                          scaler=scaler)
             model.train()
+        if should_save:
+            next_save_step = ((step // args.save_interval) + 1) * args.save_interval
 
         del input_ids, labels, audio_labels, audio_inputs, audio_lens, pixel_values, spk_emb, res, loss
-
-    if last_step > start_step and last_step % args.accumulation_steps != 0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad(set_to_none=True)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MiniMind-O SFT")
@@ -167,6 +168,10 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_project", type=str, default="MiniMind-O-SFT", help="wandb项目名")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
     args = parser.parse_args()
+    if args.accumulation_steps < 1:
+        parser.error("--accumulation_steps must be at least 1")
+    if args.save_interval < 1:
+        parser.error("--save_interval must be at least 1")
 
     # ========== 1. 初始化环境和随机种子 ==========
     local_rank = init_distributed_mode()
@@ -239,6 +244,12 @@ if __name__ == "__main__":
     # ========== 6. 从ckp恢复状态 ==========
     start_epoch, start_step = 0, 0
     if ckp_data:
+        saved_accumulation_steps = ckp_data.get('accumulation_steps')
+        if saved_accumulation_steps is not None and saved_accumulation_steps != args.accumulation_steps:
+            raise ValueError(
+                f"Checkpoint uses accumulation_steps={saved_accumulation_steps}, "
+                f"but this run requested {args.accumulation_steps}; resume with the saved value."
+            )
         model.load_state_dict(ckp_data['model'], strict=False)
         optimizer.load_state_dict(ckp_data['optimizer'])
         scaler.load_state_dict(ckp_data['scaler'])
