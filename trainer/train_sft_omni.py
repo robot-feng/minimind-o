@@ -68,7 +68,7 @@ def omni_collate_fn(batch):
             # A still image is represented as a zero-copy repeated frame view.
             base_images = torch.stack([image[0] for image in normalized])
             pixel_values = {
-                'pixel_values': base_images.unsqueeze(1).expand(-1, max_frames, -1, -1, -1),
+                'pixel_values': base_images.unsqueeze(1).expand(-1, max_frames, -1, -1, -1).contiguous(),
                 'static_image_mask': torch.ones(len(normalized), dtype=torch.bool),
             }
             spk_emb = torch.stack(spk_emb)

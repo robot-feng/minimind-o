@@ -144,6 +144,27 @@ class TestI2TTrainingDataset(unittest.TestCase):
         self.assertEqual(pixel_values["static_image_mask"].tolist(), [True, False])
         torch.testing.assert_close(pixel_values["pixel_values"][0, 3], pixel_values["pixel_values"][0, 0])
 
+    def test_static_image_collate_materializes_frame_storage_for_pinned_memory(self):
+        def sample(value):
+            return (
+                torch.zeros(9, 3, dtype=torch.long),
+                torch.zeros(3, dtype=torch.long),
+                torch.zeros(8, 3, dtype=torch.long),
+                None,
+                0,
+                {
+                    "pixel_values": torch.full((4, 3, 2, 2), float(value)),
+                    "static_image_mask": torch.tensor(True),
+                },
+                torch.zeros(192),
+            )
+
+        batch = omni_collate_fn([sample(1), sample(2)])
+        pixels = batch[5]["pixel_values"]
+        self.assertTrue(pixels.is_contiguous())
+        self.assertNotEqual(pixels.stride(1), 0)
+        torch.testing.assert_close(pixels[:, 0], pixels[:, 3])
+
 
 if __name__ == "__main__":
     unittest.main()
