@@ -577,6 +577,7 @@ class TestAgentTools(unittest.TestCase):
         class Tokenizer:
             def __init__(self):
                 self.rendered = []
+                self.max_lengths = []
 
             def apply_chat_template(self, messages, **kwargs):
                 text = json.dumps(messages, ensure_ascii=False)
@@ -584,6 +585,7 @@ class TestAgentTools(unittest.TestCase):
                 return text
 
             def __call__(self, texts, **kwargs):
+                self.max_lengths.append(kwargs["max_length"])
                 rows = [torch.tensor([len(text) % 17 + 1, 2]) for text in texts]
                 return Encoding(torch.stack(rows))
 
@@ -614,7 +616,7 @@ class TestAgentTools(unittest.TestCase):
             Engine([[tool_call, "Other answer"], ["42"]]),
             tokenizer,
             SimpleNamespace(num_generations=2, max_turns=2, max_seq_len=64,
-                             max_gen_len=8, device="cpu", thinking_ratio=0.0),
+                             max_gen_len=8, max_total_len=40, device="cpu", thinking_ratio=0.0),
         )
 
         self.assertEqual(len(episodes), 2)
@@ -622,6 +624,7 @@ class TestAgentTools(unittest.TestCase):
         self.assertEqual(episodes[0]["final"], "42")
         self.assertFalse(episodes[0]["unfinished"])
         self.assertEqual(len(episodes[0]["actions"]), 2)
+        self.assertEqual(tokenizer.max_lengths, [32, 32])
         self.assertEqual(episodes[1]["turns"], ["Other answer"])
         self.assertEqual(len(episodes[1]["actions"]), 1)
         tool_message = json.loads(tokenizer.rendered[-1])[-1]
@@ -657,7 +660,7 @@ class TestAgentTools(unittest.TestCase):
              "tools": [[]], "gt": [["2"]]},
             Engine(), Tokenizer(),
             SimpleNamespace(num_generations=2, max_turns=1, max_seq_len=64,
-                             max_gen_len=8, device="cpu", thinking_ratio=0.0),
+                             max_gen_len=8, max_total_len=80, device="cpu", thinking_ratio=0.0),
         )
         self.assertEqual(len(episodes), 2)
         self.assertTrue(all(episode["unfinished"] for episode in episodes))

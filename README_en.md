@@ -443,6 +443,7 @@ python train_tokenizer.py --data_path ../dataset/pretrain_t2t_mini.jsonl --token
 ```
 
 RL entry points use native PyTorch rollout by default. `train_grpo.py`, `train_ppo.py` and `train_agent.py` also expose an SGLang HTTP backend with `--rollout_engine sglang`; it requires a separate SGLang service compatible with MiniMind-O and a checkpoint directory shared by the service and training process. Agent RL currently includes local arithmetic, time and unit-conversion tools plus verifiable-reward examples; it does not provide web search or a production tool sandbox.
+Agent RL's `--max_total_len` bounds the prompt plus maximum generated response for each policy action; the prompt budget is reduced to fit that context limit.
 
 Single-GPU and DDP runs deterministically shuffle data each epoch and preserve that epoch order on resume. Use `--seed` to select the random seed, `--device` to select a single-device target, and `--use_compile 1` to enable `torch.compile`. PPO supports minibatches, repeated PPO updates, gradient accumulation and KL early stopping; for example: `--mini_batch_size 2 --ppo_update_iters 2 --accumulation_steps 1 --early_stop_kl 0.25`. The original option names `--lam`, `--vf_coef`, `--kl_coef` and `--cliprange_value` remain available as aliases.
 

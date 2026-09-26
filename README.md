@@ -440,6 +440,7 @@ python train_tokenizer.py --data_path ../dataset/pretrain_t2t_mini.jsonl --token
 ```
 
 RL 入口默认使用 PyTorch 原生 rollout。`train_grpo.py`、`train_ppo.py` 和 `train_agent.py` 也提供 SGLang HTTP rollout 选项（`--rollout_engine sglang`）；需要单独启动兼容 MiniMind-O 的 SGLang 服务，并确保训练进程与服务可以访问同一个 checkpoint 目录。Agent RL 当前提供的是便于复现的本地算术、时间、单位换算等工具和可验证奖励示例，不包含联网搜索或生产级工具沙箱。
+Agent RL 的 `--max_total_len` 限制单次策略更新中 prompt 与最大生成长度之和；代码会据此缩短 prompt 预算，避免超出配置的上下文长度。
 
 单卡和 DDP 训练都会按 epoch 确定性打乱数据，恢复训练时会沿用对应 epoch 的顺序；可用 `--seed` 控制随机种子、`--device` 指定单卡设备，`--use_compile 1` 启用 `torch.compile`。PPO 支持 minibatch、多轮 PPO 更新、梯度累积和 KL 早停；例如 `--mini_batch_size 2 --ppo_update_iters 2 --accumulation_steps 1 --early_stop_kl 0.25`。原版参数名 `--lam`、`--vf_coef`、`--kl_coef`、`--cliprange_value` 也保留为别名。
 

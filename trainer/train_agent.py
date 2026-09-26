@@ -58,8 +58,9 @@ def collect_agent_rollouts(batch, engine, tokenizer, args):
             episodes[i]["messages"], tokenize=False, add_generation_prompt=True,
             tools=episodes[i]["tools"], open_thinking=(turn == 0 and random.random() < args.thinking_ratio),
         ) for i in active]
+        prompt_limit = min(args.max_seq_len, args.max_total_len - args.max_gen_len)
         encoded = tokenizer(contexts, return_tensors="pt", padding=True, truncation=True,
-                            max_length=args.max_seq_len, add_special_tokens=False).to(args.device)
+                            max_length=prompt_limit, add_special_tokens=False).to(args.device)
         result = engine.rollout(encoded.input_ids, encoded.attention_mask,
                                 num_generations=1, max_new_tokens=args.max_gen_len)
         next_active = []
@@ -175,6 +176,8 @@ def main():
     parser.add_argument("--max_turns", type=int, default=3)
     parser.add_argument("--max_seq_len", type=int, default=768)
     parser.add_argument("--max_gen_len", type=int, default=256)
+    parser.add_argument("--max_total_len", type=int, default=2500,
+                        help="per-action context plus maximum response token budget")
     parser.add_argument("--learning_rate", type=float, default=3e-7)
     parser.add_argument("--accumulation_steps", type=int, default=1)
     parser.add_argument("--beta", type=float, default=0.1)
@@ -202,10 +205,11 @@ def main():
     parser.add_argument("--sglang_base_url", default="http://localhost:8998")
     parser.add_argument("--sglang_shared_path", default="../out/sglang_agent")
     args = parser.parse_args()
-    if (args.num_generations < 2 or args.max_turns < 1 or args.max_gen_len < 1
+    if (args.num_generations < 2 or args.max_turns < 1 or args.max_seq_len < 1
+            or args.max_gen_len < 1 or args.max_total_len <= args.max_gen_len
             or args.accumulation_steps < 1 or args.debug_interval < 1):
-        parser.error("num_generations >= 2; max_turns, max_gen_len, accumulation_steps "
-                     "and debug_interval must be positive")
+        parser.error("num_generations >= 2; max_turns, max_seq_len, accumulation_steps "
+                     "and debug_interval must be positive; max_total_len must exceed max_gen_len")
 
     local_rank = init_distributed_mode()
     args.device = (f"cuda:{local_rank}" if dist.is_initialized()
@@ -214,7 +218,7 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     config = OmniConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers,
                         use_moe=bool(args.use_moe),
-                        max_position_embeddings=args.max_seq_len + args.max_gen_len * args.max_turns)
+                        max_position_embeddings=args.max_total_len)
     resume = omni_checkpoint(config, weight=args.save_weight, save_dir=args.resume_dir,
                              batch_size=args.batch_size) if args.from_resume else None
     model, tokenizer = init_omni_model(

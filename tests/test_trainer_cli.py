@@ -55,6 +55,19 @@ class TestTrainerCLI(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("cannot be combined", result.stderr)
 
+    def test_agent_total_length_must_fit_a_generation(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "trainer" / "train_agent.py"),
+             "--max_total_len", "8", "--max_gen_len", "8"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("max_total_len must exceed max_gen_len", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
