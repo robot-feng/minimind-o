@@ -240,10 +240,11 @@ python eval_omni.py --weight sft_zero --mode 6 --video_dir ./dataset/videos --vi
 To evaluate image/video-to-text without generating speech, skip the audio modules and run:
 
 ```bash
-python eval_omni.py --weight sft_full_a2a --mode 4,6 --text_only --prompt_lang 1 --image_dir ./dataset/eval_omni --video_dir ./out/eval_video --max_new_tokens 128
+python eval_omni.py --weight sft_full_a2a --mode 4,6 --text_only --prompt_lang 1 --image_dir ./dataset/eval_omni --video_dir ./out/eval_video --max_new_tokens 128 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_full_a2a.jsonl
 ```
 
 This reads images from `dataset/eval_omni` and videos from `out/eval_video`; there are currently no video files in `dataset/eval_omni`. `sft_full_a2a` is the weight prefix currently available in this repository; replace `--weight` when using another checkpoint.
+`--results_jsonl` saves the mode, filename, prompt and answer for each sample. A fixed seed and greedy decoding make runs reproducible and easier to compare across checkpoints.
 
 You can also call `MiniMindOmni.generate_text(..., pixel_values=...)` directly. It accepts the same visual input formats as `forward`: `{"pixel_values": image_tensor}`, a `[B, C, H, W]` image tensor, or a `[B, F, C, H, W]` video-frame tensor. The input token sequence must contain one matching `<|image_pad|>` block per image or frame. This path runs only the Thinker and is useful for isolating visual understanding.
 
@@ -379,7 +380,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 tra
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --vision_only --mode all --data_path ../dataset/sft_i2t_mini.parquet --from_weight sft_i2t_mini_proj --save_weight sft_i2t_mini --epochs 1 --batch_size 2 --accumulation_steps 4 --learning_rate 5e-6 --max_seq_len 768 --use_compile 0
 ```
 
-`--vision_only` runs only the Thinker image-to-text path: it skips SenseVoice loading and the Talker audio loss. Evaluate the resulting weights with `python eval_omni.py --weight sft_i2t_mini --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni`. This 10k subset is for quickly validating the visual training path; it is not equivalent to full-data training or reproducing the released model.
+`--vision_only` runs only the Thinker image-to-text path: it skips SenseVoice loading and the Talker audio loss. Evaluate the resulting weights with `python eval_omni.py --weight sft_i2t_mini --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_i2t_mini.jsonl`. Align the two JSONL files by `source` to compare the replies before and after visual fine-tuning. This 10k subset is for quickly validating the visual training path; it is not equivalent to full-data training or reproducing the released model.
 
 ### MiniMind training capabilities in MiniMind-O
 

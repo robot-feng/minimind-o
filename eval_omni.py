@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import random
 import time
@@ -12,6 +13,14 @@ from dataset.video import VIDEO_EXTENSIONS, prepare_video_inputs
 from trainer.audio_output import save_generated_audio
 from trainer.trainer_utils import setup_seed, log_model_params
 warnings.filterwarnings('ignore')
+
+
+def save_visual_result(path, mode, source, prompt, answer):
+    if not path or answer is None:
+        return
+    result = {"mode": mode, "source": source, "prompt": prompt, "answer": answer}
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
 
 def init_model(args):
@@ -121,6 +130,8 @@ def main():
     parser.add_argument('--vision_dir', default='google/tipsv2-b14', type=str, help="TIPSv2视觉模型 ID 或本地路径")
     parser.add_argument('--open_thinking', default=0, type=int, help="是否开启思考模式（0=否，1=是）（思考模式下禁用audio输出）")
     parser.add_argument('--text_only', action='store_true', help="仅生成文本，不加载或运行音频模块；适用于文本、图像和视频评估")
+    parser.add_argument('--results_jsonl', type=str, help="仅文本图像/视频评测：逐样本保存来源、提示和回答")
+    parser.add_argument('--seed', type=int, help="固定随机种子以便复现实验")
     parser.add_argument('--decode_audio', default=1, type=int, help="是否解码音频输出（0=否，1=是）")
     parser.add_argument('--mode', default='0', type=str, help="评估模式：-1=all 0=text 1=multi 2=audio 3=clone 4=image 5=mix 6=video（逗号组合，如 2,5）")
     parser.add_argument('--prompt_lang', default=0, type=int, choices=[0, 1, 2], help="问题语言：0=英文 1=中文 2=英文+中文")
@@ -128,10 +139,17 @@ def main():
     modes = set(args.mode.replace(',', '').replace('-1', '0123456'))
     if args.text_only and modes.intersection({'2', '3', '5'}):
         parser.error("--text_only cannot be combined with audio or mixed-input modes 2, 3, or 5")
+    if args.results_jsonl and (not args.text_only or not modes.intersection({'4', '6'})):
+        parser.error("--results_jsonl requires --text_only and image or video mode 4/6")
     
-    os.makedirs(args.output_dir, exist_ok=True)
+    if not args.text_only:
+        os.makedirs(args.output_dir, exist_ok=True)
+    if args.results_jsonl:
+        os.makedirs(os.path.dirname(os.path.abspath(args.results_jsonl)), exist_ok=True)
+        with open(args.results_jsonl, 'w', encoding='utf-8'):
+            pass
     model, tokenizer = init_model(args)
-    setup_seed(int(time.time()) % 31415926)
+    setup_seed(args.seed if args.seed is not None else int(time.time()) % 31415926)
 
     if '0' in modes:
         print('\n\n==================== text -> {text, audio} ====================')
@@ -238,7 +256,10 @@ def main():
             prompts = [["Please describe this image."], ["请描述这张图片"], ["Please describe this image.", "请描述这张图片"]][args.prompt_lang]
             for lang_idx, prompt_text in enumerate(prompts):
                 prompt = prompt_text + "\n\n" + model.config.image_special_token * model.config.image_token_len
-                eval_sample(model, tokenizer, args, idx, prompt, None, f"image-{idx:02d}-{lang_idx}-{os.path.splitext(image_file)[0]}.mp3", pixel_values=pixel_values)
+                answer = eval_sample(model, tokenizer, args, idx, prompt, None,
+                                     f"image-{idx:02d}-{lang_idx}-{os.path.splitext(image_file)[0]}.mp3",
+                                     pixel_values=pixel_values)
+                save_visual_result(args.results_jsonl, "image", image_file, prompt_text, answer)
 
     if '5' in modes:
         print('\n\n==================== text+audio+image -> {text, audio} ====================')
@@ -270,9 +291,10 @@ def main():
             )
             for lang_idx, prompt_text in enumerate(prompts):
                 prompt = f"{prompt_text}\n\n{frame_prompt}"
-                eval_sample(model, tokenizer, args, idx, prompt, None,
-                            f"video-{idx:02d}-{lang_idx}-{os.path.splitext(video_file)[0]}.mp3",
-                            pixel_values=pixel_values)
+                answer = eval_sample(model, tokenizer, args, idx, prompt, None,
+                                     f"video-{idx:02d}-{lang_idx}-{os.path.splitext(video_file)[0]}.mp3",
+                                     pixel_values=pixel_values)
+                save_visual_result(args.results_jsonl, "video", video_file, prompt, answer)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,14 @@
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 
-from eval_omni import eval_sample
+from eval_omni import eval_sample, save_visual_result
 
 
 class FakeTokenizer:
@@ -30,6 +35,36 @@ class FakeTextModel:
 
 
 class TestTextOnlyEvaluation(unittest.TestCase):
+    def test_results_jsonl_requires_text_only_visual_mode(self):
+        entrypoint = Path(__file__).resolve().parents[1] / "eval_omni.py"
+        for args in (
+            ["--results_jsonl", "out/result.jsonl", "--mode", "4"],
+            ["--text_only", "--results_jsonl", "out/result.jsonl", "--mode", "0"],
+        ):
+            with self.subTest(args=args):
+                result = subprocess.run(
+                    [sys.executable, str(entrypoint), *args],
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("--results_jsonl requires", result.stderr)
+
+    def test_visual_result_is_saved_as_utf8_jsonl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.jsonl"
+            save_visual_result(str(path), "image", "猫.jpg", "请描述", "一只猫")
+            row = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(row, {
+            "mode": "image", "source": "猫.jpg", "prompt": "请描述", "answer": "一只猫",
+        })
+
+    def test_missing_answer_is_not_written(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.jsonl"
+            save_visual_result(str(path), "video", "clip.avi", "描述", None)
+            self.assertFalse(path.exists())
+
     def test_eval_sample_routes_visual_inputs_to_text_generation(self):
         model = FakeTextModel()
         tokenizer = FakeTokenizer()
