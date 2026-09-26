@@ -355,7 +355,7 @@ HF_ENDPOINT=https://huggingface.co hf download jingyaogong/minimind-o_dataset \
   --repo-type dataset --local-dir ./dataset
 ```
 
-然后运行 `bash trainer/train_full_dense.sh`。脚本会先校验三个 parquet 的 SHA-256，再按 T2A、A2A、I2T 顺序训练七个阶段，为阶段保留独立断点，并将最终权重写入 `out/sft_omni_768.pth`。默认使用 4 卡 DDP、每卡 batch 32；可用 `CUDA_VISIBLE_DEVICES`、`NPROC_PER_NODE` 和 `BATCH_SIZE` 覆盖。运行前可设置 `DRY_RUN=1` 检查命令计划而不启动训练。
+然后运行 `bash trainer/train_full_dense.sh`。脚本会先校验三个 parquet 的 SHA-256，再按 T2A、A2A、I2T 顺序训练七个阶段，为阶段保留独立断点，并将最终权重写入 `out/sft_omni_768.pth`。默认使用 4 卡 DDP；多数阶段每卡 batch 32，显存更重的全量 A2A 阶段每卡 batch 8、梯度累积 4 次，使有效全局 batch 仍为 128。可用 `CUDA_VISIBLE_DEVICES`、`NPROC_PER_NODE`、`BATCH_SIZE`、`ACCUMULATION_STEPS`、`A2A_BATCH_SIZE` 和 `A2A_ACCUMULATION_STEPS` 覆盖。运行前可设置 `DRY_RUN=1` 检查命令计划而不启动训练。
 
 ### MiniMind 训练能力在 MiniMind-O 中的对应入口
 

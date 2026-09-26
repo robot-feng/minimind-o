@@ -358,7 +358,7 @@ HF_ENDPOINT=https://huggingface.co hf download jingyaogong/minimind-o_dataset \
   --repo-type dataset --local-dir ./dataset
 ```
 
-Then run `bash trainer/train_full_dense.sh`. It verifies the dataset SHA-256 values before training, runs seven resumable stages in T2A, A2A and I2T order, and writes the final checkpoint to `out/sft_omni_768.pth`. The default is four-GPU DDP with a per-GPU batch size of 32; override `CUDA_VISIBLE_DEVICES`, `NPROC_PER_NODE` or `BATCH_SIZE` as needed. Set `DRY_RUN=1` to inspect the commands without starting training.
+Then run `bash trainer/train_full_dense.sh`. It verifies the dataset SHA-256 values before training, runs seven resumable stages in T2A, A2A and I2T order, and writes the final checkpoint to `out/sft_omni_768.pth`. The default is four-GPU DDP. Most stages use a per-GPU batch size of 32; the memory-intensive full A2A stages use batch 8 with gradient accumulation 4, preserving the same effective global batch of 128. Override `CUDA_VISIBLE_DEVICES`, `NPROC_PER_NODE`, `BATCH_SIZE`, `ACCUMULATION_STEPS`, `A2A_BATCH_SIZE` or `A2A_ACCUMULATION_STEPS` as needed. Set `DRY_RUN=1` to inspect the commands without starting training.
 
 ### MiniMind training capabilities in MiniMind-O
 
