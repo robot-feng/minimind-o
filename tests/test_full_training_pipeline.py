@@ -60,6 +60,10 @@ class TestFullTrainingPipeline(unittest.TestCase):
         for index in (0, 1, 3, 4, 6):
             self.assertIn("--batch_size 32 --accumulation_steps 1", commands[index])
         self.assertIn("--vision_dir google/tipsv2-b14", commands[-1])
+        for index in (3, 4, 6):
+            self.assertIn("--vision_only", commands[index])
+        for index in (0, 1, 2, 5):
+            self.assertNotIn("--vision_only", commands[index])
         self.assertIn("Dry run complete; no training was started.", result.stdout)
 
     def test_dry_run_uses_conda_torchrun_when_shell_has_no_torchrun(self):

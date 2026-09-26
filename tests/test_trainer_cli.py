@@ -21,6 +21,7 @@ EXPECTED_OPTIONS = {
     "train_ppo.py": ("--debug_mode", "--debug_interval", "--debug_log_ratio"),
     "train_grpo.py": ("--debug_mode", "--debug_interval"),
     "train_agent.py": ("--debug_mode", "--debug_interval"),
+    "train_sft_omni.py": ("--vision_only",),
 }
 
 
@@ -40,6 +41,19 @@ class TestTrainerCLI(unittest.TestCase):
                 self.assertIn("usage:", result.stdout.lower())
                 for option in EXPECTED_OPTIONS.get(entrypoint, ()):
                     self.assertIn(option, result.stdout)
+
+    def test_vision_only_rejects_audio_projector_mode(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "trainer" / "train_sft_omni.py"),
+             "--vision_only", "--mode", "audio_proj"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot be combined", result.stderr)
 
 
 if __name__ == "__main__":

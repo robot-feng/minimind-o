@@ -65,6 +65,10 @@ run_stage() {
     local save_weight="$1" from_weight="$2" data_file="$3"
     local epochs="$4" learning_rate="$5" mode="$6" use_compile="$7" max_seq_len="$8"
     local batch_size="$9" accumulation_steps="${10}"
+    local -a modality_args=()
+    if [[ "$data_file" == sft_i2t.parquet ]]; then
+        modality_args+=(--vision_only)
+    fi
     local -a command=(
         "${TORCHRUN[@]}" --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT"
         train_sft_omni.py
@@ -74,6 +78,7 @@ run_stage() {
         --from_weight "$from_weight" --save_weight "$save_weight"
         --max_seq_len "$max_seq_len" --mode "$mode" --use_moe 0 --from_resume 1
         --vision_dir "$VISION_DIR"
+        "${modality_args[@]}"
     )
 
     printf '\n=== %s: %s, %s epoch(s), %s, batch=%s, grad_accum=%s ===\n' \

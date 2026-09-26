@@ -110,6 +110,37 @@ class TestTIPSv2ImageProcessing(unittest.TestCase):
 
 
 class TestVideoInput(unittest.TestCase):
+    def test_vision_projector_receives_gradients_without_talker(self):
+        config = OmniConfig(
+            hidden_size=12, num_hidden_layers=1, vocab_size=128,
+            num_attention_heads=3, num_key_value_heads=1, intermediate_size=24,
+            talker_hidden_size=16, num_talker_hidden_layers=1,
+            image_hidden_size=3, image_token_len=4, max_position_embeddings=64,
+        )
+        model = MiniMindOmni(config, audio_encoder_path=None, vision_model_path=None)
+        object.__setattr__(model, "vision_encoder", FakeTIPSv2())
+        model.vision_proj = nn.Linear(3, config.hidden_size, bias=False)
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for parameter in model.vision_proj.parameters():
+            parameter.requires_grad = True
+
+        image_marker = config.image_ids[0]
+        input_ids = torch.tensor([[1, image_marker, image_marker, image_marker, image_marker, 7]])
+        result = model(
+            input_ids,
+            pixel_values={"pixel_values": torch.ones(1, 3, 8, 8)},
+            text_only=True,
+        )
+        result.logits[..., 3].sum().backward()
+
+        self.assertIsNotNone(model.vision_proj.weight.grad)
+        self.assertTrue(all(
+            parameter.grad is None
+            for name, parameter in model.named_parameters()
+            if not name.startswith("vision_proj.")
+        ))
+
     def test_uniform_sampling_keeps_frame_order_and_timestamps(self):
         capture = FakeCapture("sample.avi")
         with patch("dataset.video.cv2.VideoCapture", return_value=capture):

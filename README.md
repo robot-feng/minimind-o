@@ -367,6 +367,17 @@ HF_ENDPOINT=https://huggingface.co hf download jingyaogong/minimind-o_dataset \
 
 然后运行 `bash trainer/train_full_dense.sh`。脚本会先校验三个 parquet 的 SHA-256，再按 T2A、A2A、I2T 顺序训练七个阶段，为阶段保留独立断点，并将最终权重写入 `out/sft_omni_768.pth`。默认使用 4 卡 DDP；多数阶段每卡 batch 32，显存更重的全量 A2A 阶段每卡 batch 8、梯度累积 4 次，使有效全局 batch 仍为 128。可用 `CUDA_VISIBLE_DEVICES`、`NPROC_PER_NODE`、`BATCH_SIZE`、`ACCUMULATION_STEPS`、`A2A_BATCH_SIZE` 和 `A2A_ACCUMULATION_STEPS` 覆盖。运行前可设置 `DRY_RUN=1` 检查命令计划而不启动训练。
 
+若已训练到 A2A、想先用较小数据验证视觉微调，可从完整 I2T 集抽取可复现的 10,000 条样本。抽样按分散的 Parquet row group 读取，不会把 2.9M 行全载入内存：
+
+```bash
+python dataset/prepare_i2t_subset.py --input dataset/sft_i2t.parquet --output dataset/sft_i2t_mini.parquet --max_samples 10000 --seed 42
+cd trainer
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --vision_only --mode vision_proj --data_path ../dataset/sft_i2t_mini.parquet --from_weight sft_full_a2a --save_weight sft_i2t_mini_proj --epochs 1 --batch_size 2 --accumulation_steps 2 --learning_rate 5e-5 --max_seq_len 768 --use_compile 0
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --vision_only --mode all --data_path ../dataset/sft_i2t_mini.parquet --from_weight sft_i2t_mini_proj --save_weight sft_i2t_mini --epochs 1 --batch_size 2 --accumulation_steps 4 --learning_rate 5e-6 --max_seq_len 768 --use_compile 0
+```
+
+`--vision_only` 只运行 Thinker 的图像到文本路径，不加载 SenseVoice，也不计算 Talker 音频损失。两阶段权重可用 `python eval_omni.py --weight sft_i2t_mini --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni` 检查。此 10k 子集用于快速验证视觉训练闭环，不等价于 full 数据训练或发布模型复现。
+
 ### MiniMind 训练能力在 MiniMind-O 中的对应入口
 
 MiniMind 上游 `trainer/` 中与语言模型训练相关的能力，已适配到根仓库 `trainer/`，并使用 MiniMind-O 的模型、tokenizer 与 checkpoint 格式。文本预训练、文本 SFT、LoRA、蒸馏和偏好/RL 入口目前只训练 Thinker 文本路径；音频和图像监督通过上面的 `train_sft_omni.py` 完成。视频目前支持均匀抽帧、时间标记和模型推理输入；仓库尚未提供视频监督数据集适配器，因此训练视频时序理解需要先准备相应数据并扩展数据管线。

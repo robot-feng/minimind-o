@@ -9,7 +9,6 @@ import argparse
 import time
 import warnings
 import torch
-import torch.nn as nn
 import torch.distributed as dist
 from contextlib import nullcontext
 from torch import optim
@@ -17,6 +16,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from model.model_omni import OmniConfig
 from dataset.omni_dataset import OmniDataset
+from trainer.training_losses import omni_sft_losses
 from trainer.trainer_utils import get_lr, get_optimizer_step, get_accumulation_window_size, Logger, is_main_process, init_distributed_mode, setup_seed, init_omni_model, omni_checkpoint, SkipBatchSampler, log_model_params
 
 warnings.filterwarnings('ignore')
@@ -72,32 +72,17 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             param_group['lr'] = lr
 
         with autocast_ctx:
-            res = model(input_ids, audio_inputs=audio_inputs, audio_lens=audio_lens, pixel_values=pixel_values, spk_emb=spk_emb)
-            loss_fct = nn.CrossEntropyLoss(reduction='none')
-            
-            # Text loss
-            text_loss_raw = loss_fct(res.logits.view(-1, res.logits.size(-1)), labels.view(-1))
-            text_mask = (labels.view(-1) != -100).float()
-            text_loss = (text_loss_raw * text_mask).sum() / (text_mask.sum() + 1e-9)
-            
-            # Audio loss
-            audio_loss = res.audio_logits[0].sum() * 0
-            for i, al in enumerate(res.audio_logits):
-                al_flat = al.view(-1, al.size(-1))
-                target_flat = audio_labels[:, i, :].reshape(-1)
-                layer_loss = loss_fct(al_flat, target_flat)
-                valid_mask = (target_flat != -100).float()
-                stop_mask = (target_flat == 2050).float()
-                weighted_loss = layer_loss * valid_mask * (1 + stop_mask * 9)
-                msum = valid_mask.sum()
-                if msum > 0:
-                    audio_loss = audio_loss + weighted_loss.sum() / (msum + 1e-9)
-            audio_loss = audio_loss / 8 
-            
+            res = model(
+                input_ids, audio_inputs=audio_inputs, audio_lens=audio_lens,
+                pixel_values=pixel_values, spk_emb=spk_emb, text_only=args.vision_only,
+            )
+            text_loss, audio_loss, total_loss = omni_sft_losses(
+                res, labels, audio_labels, vision_only=args.vision_only,
+            )
             accumulation_window_size = get_accumulation_window_size(
                 step, iters, args.accumulation_steps
             )
-            loss = (text_loss + audio_loss + res.aux_loss) / accumulation_window_size
+            loss = total_loss / accumulation_window_size
 
         scaler.scale(loss).backward()
         should_step = step % args.accumulation_steps == 0 or step == iters
@@ -157,13 +142,14 @@ if __name__ == "__main__":
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--max_seq_len', default=512, type=int, help="训练的最大截断长度")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构")
-    parser.add_argument("--data_path", type=str, default="../dataset/train_t2a_mini.parquet", help="训练数据路径（parquet格式）")
+    parser.add_argument("--data_path", type=str, default="../dataset/sft_t2a_mini.parquet", help="训练数据路径（parquet格式）")
     parser.add_argument("--audio_encoder_dir", type=str, default="../model/SenseVoiceSmall", help="音频encoder路径(SenseVoice)")
     parser.add_argument("--vision_dir", type=str, default="google/tipsv2-b14", help="TIPSv2视觉模型 ID 或本地路径")
     parser.add_argument('--from_weight', default='llm', type=str, help="基于哪个权重训练，为none则不基于任何权重训练")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument('--freeze_backbone', default='none', type=str, choices=['none', 'all', 'last1'], help="冻结主干模型: none=全量训练, all=只训练audio层, last1=只训练最后1层+audio层")
     parser.add_argument('--mode', default='all', type=str, choices=['all', 'audio_proj', 'vision_proj'], help="训练模式: all=全量训练, audio_proj=只训练audio_proj, vision_proj=只训练vision_proj")
+    parser.add_argument('--vision_only', action='store_true', help="仅训练Thinker视觉文本路径，跳过音频编码与Talker；适用于I2T数据")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-O-SFT", help="wandb项目名")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
@@ -172,6 +158,8 @@ if __name__ == "__main__":
         parser.error("--accumulation_steps must be at least 1")
     if args.save_interval < 1:
         parser.error("--save_interval must be at least 1")
+    if args.vision_only and args.mode == 'audio_proj':
+        parser.error("--vision_only cannot be combined with --mode audio_proj")
 
     # ========== 1. 初始化环境和随机种子 ==========
     local_rank = init_distributed_mode()
@@ -206,7 +194,7 @@ if __name__ == "__main__":
     
     # ========== 5. 定义模型、数据、优化器 ==========
     model, tokenizer = init_omni_model(omni_config, from_weight=args.from_weight,
-                                        audio_encoder_path=args.audio_encoder_dir,
+                                        audio_encoder_path=None if args.vision_only else args.audio_encoder_dir,
                                         vision_model_path=args.vision_dir,
                                         save_dir=args.save_dir, device=args.device,
                                         freeze_backbone=args.freeze_backbone, from_resume=args.from_resume)
@@ -223,9 +211,12 @@ if __name__ == "__main__":
     elif args.mode == 'vision_proj':
         for p in model.parameters(): p.requires_grad = False
         for p in model.vision_proj.parameters(): p.requires_grad = True
+    if args.vision_only:
+        for module in (model.talker, model.audio_proj):
+            for p in module.parameters(): p.requires_grad = False
     log_model_params(model)
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
-    Logger(f'Trainable: {trainable:.2f}M | Mode: {args.mode} | Freeze: {args.freeze_backbone} | Compile: {"on" if args.use_compile else "off"}')
+    Logger(f'Trainable: {trainable:.2f}M | Mode: {args.mode} | Vision-only: {args.vision_only} | Freeze: {args.freeze_backbone} | Compile: {"on" if args.use_compile else "off"}')
     
     # scheduled_sampling 现在会自动保护 image/audio token 的连续性
     train_ds = OmniDataset(

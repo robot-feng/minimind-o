@@ -16,7 +16,12 @@ from trainer.alignment_utils import dpo_loss, masked_sequence_logps, token_log_p
 from trainer.agent_tools import calculate_agent_reward, execute_tool, parse_tool_calls, safe_math_eval
 from trainer.rl_utils import grpo_cispo_loss, group_relative_advantages, score_responses
 from trainer.rollout_engine import RolloutResult, SGLangRolloutEngine, TorchRolloutEngine
-from trainer.training_losses import causal_lm_loss, distillation_objective, masked_distillation_loss
+from trainer.training_losses import (
+    causal_lm_loss,
+    distillation_objective,
+    masked_distillation_loss,
+    omni_sft_losses,
+)
 from trainer.ppo_utils import clipped_value_loss, generalized_advantage_estimate, ppo_policy_loss
 from trainer.train_ppo import PPOValueModel, _trainable_value, train_batch
 from trainer.train_agent import collect_agent_rollouts
@@ -402,6 +407,43 @@ class TestLoRA(unittest.TestCase):
 
 
 class TestTextTrainingLosses(unittest.TestCase):
+    def test_vision_only_sft_uses_text_targets_without_audio_logits(self):
+        from model.model_omni import OmniCausalLMOutputWithPast
+
+        logits = torch.zeros(1, 3, 5, requires_grad=True)
+        output = OmniCausalLMOutputWithPast(
+            logits=logits,
+            audio_logits=None,
+            aux_loss=torch.tensor(0.25),
+        )
+        labels = torch.tensor([[1, 2, -100]])
+        text_loss, audio_loss, total_loss = omni_sft_losses(
+            output, labels, torch.full((1, 8, 3), -100), vision_only=True,
+        )
+
+        torch.testing.assert_close(text_loss, torch.log(torch.tensor(5.0)))
+        torch.testing.assert_close(audio_loss, torch.tensor(0.0))
+        torch.testing.assert_close(total_loss, text_loss + 0.25)
+        total_loss.backward()
+        self.assertIsNotNone(logits.grad)
+
+    def test_omni_sft_preserves_audio_stop_token_weighting(self):
+        from model.model_omni import OmniCausalLMOutputWithPast
+
+        text_logits = torch.zeros(1, 2, 4)
+        audio_logits = [torch.zeros(1, 2, 2051) for _ in range(8)]
+        output = OmniCausalLMOutputWithPast(
+            logits=text_logits,
+            audio_logits=audio_logits,
+            aux_loss=torch.tensor(0.0),
+        )
+        labels = torch.tensor([[1, -100]])
+        audio_labels = torch.full((1, 8, 2), -100)
+        audio_labels[:, :, 0] = 2050
+        _, audio_loss, _ = omni_sft_losses(output, labels, audio_labels)
+
+        self.assertAlmostEqual(audio_loss.item(), 10 * torch.log(torch.tensor(2051.0)).item(), places=5)
+
     def test_distillation_scales_moe_aux_loss_with_ce_weight(self):
         ce, kd, aux = torch.tensor(2.0), torch.tensor(4.0), torch.tensor(0.5)
         loss = distillation_objective(ce, kd, aux, alpha=0.25)

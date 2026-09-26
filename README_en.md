@@ -370,6 +370,17 @@ HF_ENDPOINT=https://huggingface.co hf download jingyaogong/minimind-o_dataset \
 
 Then run `bash trainer/train_full_dense.sh`. It verifies the dataset SHA-256 values before training, runs seven resumable stages in T2A, A2A and I2T order, and writes the final checkpoint to `out/sft_omni_768.pth`. The default is four-GPU DDP. Most stages use a per-GPU batch size of 32; the memory-intensive full A2A stages use batch 8 with gradient accumulation 4, preserving the same effective global batch of 128. Override `CUDA_VISIBLE_DEVICES`, `NPROC_PER_NODE`, `BATCH_SIZE`, `ACCUMULATION_STEPS`, `A2A_BATCH_SIZE` or `A2A_ACCUMULATION_STEPS` as needed. Set `DRY_RUN=1` to inspect the commands without starting training.
 
+If you have completed A2A training and want a smaller visual fine-tuning run, create a reproducible 10,000-example sample from the full I2T dataset. Sampling reads spaced Parquet row groups and does not load all 2.9M rows into memory:
+
+```bash
+python dataset/prepare_i2t_subset.py --input dataset/sft_i2t.parquet --output dataset/sft_i2t_mini.parquet --max_samples 10000 --seed 42
+cd trainer
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --vision_only --mode vision_proj --data_path ../dataset/sft_i2t_mini.parquet --from_weight sft_full_a2a --save_weight sft_i2t_mini_proj --epochs 1 --batch_size 2 --accumulation_steps 2 --learning_rate 5e-5 --max_seq_len 768 --use_compile 0
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --vision_only --mode all --data_path ../dataset/sft_i2t_mini.parquet --from_weight sft_i2t_mini_proj --save_weight sft_i2t_mini --epochs 1 --batch_size 2 --accumulation_steps 4 --learning_rate 5e-6 --max_seq_len 768 --use_compile 0
+```
+
+`--vision_only` runs only the Thinker image-to-text path: it skips SenseVoice loading and the Talker audio loss. Evaluate the resulting weights with `python eval_omni.py --weight sft_i2t_mini --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni`. This 10k subset is for quickly validating the visual training path; it is not equivalent to full-data training or reproducing the released model.
+
 ### MiniMind training capabilities in MiniMind-O
 
 The language-model training capabilities from upstream MiniMind's `trainer/` have been adapted under the root `trainer/` directory to use MiniMind-O's model, tokenizer and checkpoint formats. Text pretraining, text SFT, LoRA, distillation and preference/RL currently train only the Thinker text path. Audio and image supervision use `train_sft_omni.py` above. Video inputs currently support uniform frame sampling, timestamps and model inference; the repository does not yet include a video-supervised dataset adapter, so training temporal video understanding requires adding suitable data and extending the data pipeline.
