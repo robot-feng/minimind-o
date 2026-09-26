@@ -19,6 +19,7 @@ from model.model_omni import (
     TIPSv2ImageProcessor,
     pool_patch_tokens,
 )
+from trainer.training_losses import omni_sft_losses
 
 
 class FakeCapture:
@@ -126,15 +127,23 @@ class TestVideoInput(unittest.TestCase):
             parameter.requires_grad = True
 
         image_marker = config.image_ids[0]
-        input_ids = torch.tensor([[1, image_marker, image_marker, image_marker, image_marker, 7]])
+        input_ids = torch.tensor([[1, image_marker, image_marker, image_marker, image_marker, 7, 8]])
         result = model(
             input_ids,
             pixel_values={"pixel_values": torch.ones(1, 3, 8, 8)},
             text_only=True,
         )
-        result.logits[..., 3].sum().backward()
+        labels = torch.full_like(input_ids, -100)
+        labels[0, -1] = 9
+        _, audio_loss, total_loss = omni_sft_losses(
+            result, labels, torch.full((1, 8, input_ids.size(1)), -100), vision_only=True,
+        )
+        total_loss.backward()
 
         self.assertIsNotNone(model.vision_proj.weight.grad)
+        self.assertTrue(torch.isfinite(model.vision_proj.weight.grad).all())
+        self.assertGreater(model.vision_proj.weight.grad.norm().item(), 0)
+        self.assertEqual(audio_loss.item(), 0)
         self.assertTrue(all(
             parameter.grad is None
             for name, parameter in model.named_parameters()
