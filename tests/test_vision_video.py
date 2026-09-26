@@ -118,6 +118,29 @@ class TestVideoInput(unittest.TestCase):
         self.assertEqual([int(np.asarray(image)[0, 0, 0]) for image, _ in frames], [0, 3, 6])
         self.assertTrue(capture.released)
 
+    def test_sampling_more_frames_than_video_returns_each_frame_once(self):
+        capture = FakeCapture("short.avi")
+        with patch("dataset.video.cv2.VideoCapture", return_value=capture):
+            frames = sample_video_frames("short.avi", num_frames=10)
+        self.assertEqual(len(frames), 7)
+        self.assertEqual([int(np.asarray(image)[0, 0, 0]) for image, _ in frames], list(range(7)))
+        self.assertEqual([timestamp for _, timestamp in frames], [i / 2 for i in range(7)])
+        self.assertTrue(capture.released)
+
+    def test_unopenable_video_is_rejected_and_capture_released(self):
+        capture = FakeCapture("missing.avi")
+        capture.isOpened = lambda: False
+        with patch("dataset.video.cv2.VideoCapture", return_value=capture):
+            with self.assertRaisesRegex(ValueError, "Cannot open video"):
+                sample_video_frames("missing.avi", num_frames=2)
+        self.assertTrue(capture.released)
+
+    def test_nonpositive_sample_count_is_rejected_before_opening_video(self):
+        with patch("dataset.video.cv2.VideoCapture") as video_capture:
+            with self.assertRaisesRegex(ValueError, "num_frames must be positive"):
+                sample_video_frames("sample.avi", num_frames=0)
+        video_capture.assert_not_called()
+
     def test_invalid_frame_count_is_rejected_and_capture_released(self):
         capture = FakeCapture("sample.avi")
         capture.get = lambda key: 0
