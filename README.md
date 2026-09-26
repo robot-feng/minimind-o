@@ -244,6 +244,14 @@ python eval_omni.py --weight sft_full_a2a --mode 4,6 --text_only --prompt_lang 1
 
 该命令会读取 `dataset/eval_omni` 中的图片，并读取 `out/eval_video` 中的视频；当前 `dataset/eval_omni` 没有视频文件。`sft_full_a2a` 是本仓库当前已有的权重前缀，使用其他权重时替换 `--weight`。
 `--results_jsonl` 会按样本保存模式、文件名、提示和回答，配合固定种子与贪心解码可复现实验并直接比较不同 checkpoint。
+对 `dataset/eval_omni` 的 9 张图片，还可用人工核对的核心概念计算覆盖率：
+
+```bash
+python eval_visual_metrics.py ./out/eval_intermediate/sft_full_a2a.jsonl
+python eval_visual_metrics.py ./out/eval_intermediate/sft_i2t_mini.jsonl
+```
+
+脚本报告平均概念召回率和所有标注概念均命中的图片比例；标注在 `dataset/eval_omni/visual_references.json`。这是小型固定集上的关键词覆盖指标，不衡量幻觉、关系理解或描述流畅度，应同时查看 JSONL 原始回答，不宜外推为通用视觉能力指标。
 
 也可直接调用 `MiniMindOmni.generate_text(..., pixel_values=...)`。视觉输入沿用 `forward` 格式：`{"pixel_values": image_tensor}`、`[B, C, H, W]` 单图张量，或 `[B, F, C, H, W]` 视频帧张量；输入 token 序列需为每张图/每帧保留对应数量的 `<|image_pad|>` 标记。该路径只运行 Thinker，可用于单独检查视觉理解。
 
@@ -377,7 +385,16 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 tra
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 train_sft_omni.py --vision_only --mode all --data_path ../dataset/sft_i2t_mini.parquet --from_weight sft_i2t_mini_proj --save_weight sft_i2t_mini --epochs 1 --batch_size 2 --accumulation_steps 4 --learning_rate 5e-6 --max_seq_len 768 --use_compile 0
 ```
 
-`--vision_only` 只运行 Thinker 的图像到文本路径，不加载 SenseVoice，也不计算 Talker 音频损失。两阶段权重可用 `python eval_omni.py --weight sft_i2t_mini --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_i2t_mini.jsonl` 检查。将这两个 JSONL 文件按 `source` 对齐即可逐张比较微调前后的回答。此 10k 子集用于快速验证视觉训练闭环，不等价于 full 数据训练或发布模型复现。
+`--vision_only` 只运行 Thinker 的图像到文本路径，不加载 SenseVoice，也不计算 Talker 音频损失。要比较微调前后的结果，用相同的 9 张图片、提示和生成参数分别评测：
+
+```bash
+python eval_omni.py --weight sft_full_a2a --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_full_a2a.jsonl
+python eval_omni.py --weight sft_i2t_mini --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_i2t_mini.jsonl
+python eval_visual_metrics.py ./out/eval_intermediate/sft_full_a2a.jsonl
+python eval_visual_metrics.py ./out/eval_intermediate/sft_i2t_mini.jsonl
+```
+
+将两个 JSONL 文件按 `source` 对齐可逐张比较原始回答。此 10k 子集用于快速验证视觉训练闭环，不等价于 full 数据训练或发布模型复现。
 
 ### MiniMind 训练能力在 MiniMind-O 中的对应入口
 

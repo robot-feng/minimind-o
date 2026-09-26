@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import torch
 
 from eval_omni import eval_sample, save_visual_result
+from eval_visual_metrics import score_visual_results
 
 
 class FakeTokenizer:
@@ -87,6 +88,69 @@ class TestTextOnlyEvaluation(unittest.TestCase):
         self.assertEqual(call_args["temperature"], 0)
         self.assertEqual(call_args["top_p"], 1.0)
         self.assertIs(call_args["pixel_values"], pixels)
+
+
+class TestVisualMetrics(unittest.TestCase):
+    def test_metrics_match_english_chinese_aliases_and_ignore_video_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            references = root / "references.json"
+            references.write_text(json.dumps({
+                "cat.jpg": [
+                    {"concept": "cat", "aliases": ["cat", "猫"]},
+                    {"concept": "moon", "aliases": ["moon", "月亮"]},
+                ],
+                "fruit.jpg": [
+                    {"concept": "apple", "aliases": ["apple", "苹果"]},
+                ],
+            }), encoding="utf-8")
+            results = root / "results.jsonl"
+            results.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in [
+                {"mode": "image", "source": "cat.jpg", "answer": "橘猫在月亮下"},
+                {"mode": "image", "source": "fruit.jpg", "answer": "A cat naps."},
+                {"mode": "video", "source": "clip.avi", "answer": "cat"},
+            ]) + "\n", encoding="utf-8")
+
+            metrics = score_visual_results(results, references)
+
+        self.assertEqual(metrics["expected_images"], 2)
+        self.assertEqual(metrics["evaluated_images"], 2)
+        self.assertEqual(metrics["response_count"], 2)
+        self.assertEqual(metrics["missing_images"], [])
+        self.assertAlmostEqual(metrics["mean_concept_recall"], 0.5)
+        self.assertAlmostEqual(metrics["all_concepts_hit_rate"], 0.5)
+
+    def test_english_concept_matching_uses_word_boundaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            references = root / "references.json"
+            references.write_text(json.dumps({
+                "image.jpg": [{"concept": "cat", "aliases": ["cat"]}],
+            }), encoding="utf-8")
+            results = root / "results.jsonl"
+            results.write_text(json.dumps({
+                "mode": "image", "source": "image.jpg", "answer": "education"}),
+                encoding="utf-8")
+
+            metrics = score_visual_results(results, references)
+
+        self.assertEqual(metrics["mean_concept_recall"], 0.0)
+        self.assertEqual(metrics["all_concepts_hit_rate"], 0.0)
+
+    def test_missing_reference_images_are_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            references = root / "references.json"
+            references.write_text(json.dumps({
+                "expected.jpg": [{"concept": "cat", "aliases": ["cat"]}],
+            }), encoding="utf-8")
+            results = root / "results.jsonl"
+            results.write_text("", encoding="utf-8")
+
+            metrics = score_visual_results(results, references)
+
+        self.assertEqual(metrics["evaluated_images"], 0)
+        self.assertEqual(metrics["missing_images"], ["expected.jpg"])
 
 
 if __name__ == "__main__":

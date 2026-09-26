@@ -1,0 +1,50 @@
+{
+  "image-01-orange-cat-moon-desk.jpg": [
+    {"concept": "cat", "aliases": ["cat", "kitten", "猫", "小猫", "橘猫"]},
+    {"concept": "moon", "aliases": ["moon", "月亮", "月球"]},
+    {"concept": "book", "aliases": ["book", "books", "书", "书本"]}
+  ],
+  "image-02-fruit-basket-apples-bananas-oranges.jpg": [
+    {"concept": "basket", "aliases": ["basket", "篮子"]},
+    {"concept": "apple", "aliases": ["apple", "apples", "苹果"]},
+    {"concept": "banana", "aliases": ["banana", "bananas", "香蕉"]},
+    {"concept": "orange", "aliases": ["orange", "oranges", "橙子", "橘子"]}
+  ],
+  "image-03-panda-holding-hello-sign.jpg": [
+    {"concept": "panda", "aliases": ["panda", "熊猫", "大熊猫"]},
+    {"concept": "sign", "aliases": ["sign", "placard", "牌子", "标牌"]},
+    {"concept": "hello", "aliases": ["hello", "你好", "您好"]}
+  ],
+  "image-04-astronaut-riding-bicycle.jpg": [
+    {"concept": "astronaut", "aliases": ["astronaut", "宇航员", "宇航服"]},
+    {"concept": "bicycle", "aliases": ["bicycle", "bike", "自行车"]},
+    {"concept": "earth", "aliases": ["earth", "地球"]},
+    {"concept": "moon", "aliases": ["moon", "月球", "月面"]}
+  ],
+  "image-05-robot-chef-making-breakfast.jpg": [
+    {"concept": "robot", "aliases": ["robot", "机器人"]},
+    {"concept": "eggs", "aliases": ["egg", "eggs", "鸡蛋", "煎蛋"]},
+    {"concept": "toast", "aliases": ["toast", "bread", "面包", "吐司"]},
+    {"concept": "kitchen", "aliases": ["kitchen", "厨房"]}
+  ],
+  "image-06-green-dinosaur-toy-balloons.jpg": [
+    {"concept": "dinosaur", "aliases": ["dinosaur", "dino", "恐龙"]},
+    {"concept": "balloons", "aliases": ["balloon", "balloons", "气球"]},
+    {"concept": "grass", "aliases": ["grass", "lawn", "草", "草地"]}
+  ],
+  "image-07-golden-retriever-red-scarf-snow.jpg": [
+    {"concept": "dog", "aliases": ["dog", "golden retriever", "puppy", "狗", "小狗", "金毛"]},
+    {"concept": "scarf", "aliases": ["scarf", "围巾"]},
+    {"concept": "snow", "aliases": ["snow", "snowy", "雪", "下雪"]}
+  ],
+  "image-08-coffee-cup-laptop.jpg": [
+    {"concept": "coffee", "aliases": ["coffee", "咖啡"]},
+    {"concept": "cup", "aliases": ["cup", "mug", "杯子", "咖啡杯"]},
+    {"concept": "laptop", "aliases": ["laptop", "notebook computer", "笔记本电脑"]}
+  ],
+  "image-09-white-rabbit-grass.jpg": [
+    {"concept": "rabbit", "aliases": ["rabbit", "bunny", "兔子", "兔"]},
+    {"concept": "white", "aliases": ["white", "白色", "白兔"]},
+    {"concept": "grass", "aliases": ["grass", "lawn", "草", "草地"]}
+  ]
+}
