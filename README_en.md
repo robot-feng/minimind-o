@@ -237,7 +237,15 @@ Video inference uniformly samples up to 4 frames and adds a timestamp before eac
 python eval_omni.py --weight sft_zero --mode 6 --video_dir ./dataset/videos --video_frames 4
 ```
 
-To evaluate image/video-to-text without generating speech, call `MiniMindOmni.generate_text(..., pixel_values=...)`. It accepts the same visual input formats as `forward`: `{"pixel_values": image_tensor}`, a `[B, C, H, W]` image tensor, or a `[B, F, C, H, W]` video-frame tensor. The input token sequence must contain one matching `<|image_pad|>` block per image or frame. This path runs only the Thinker and is useful for isolating visual understanding.
+To evaluate image/video-to-text without generating speech, skip the audio modules and run:
+
+```bash
+python eval_omni.py --weight sft_full_a2a --mode 4,6 --text_only --prompt_lang 1 --image_dir ./dataset/eval_omni --video_dir ./out/eval_video --max_new_tokens 128
+```
+
+This reads images from `dataset/eval_omni` and videos from `out/eval_video`; there are currently no video files in `dataset/eval_omni`. `sft_full_a2a` is the weight prefix currently available in this repository; replace `--weight` when using another checkpoint.
+
+You can also call `MiniMindOmni.generate_text(..., pixel_values=...)` directly. It accepts the same visual input formats as `forward`: `{"pixel_values": image_tensor}`, a `[B, C, H, W]` image tensor, or a `[B, F, C, H, W]` video-frame tensor. The input token sequence must contain one matching `<|image_pad|>` block per image or frame. This path runs only the Thinker and is useful for isolating visual understanding.
 
 Following common VLM practice, the video path decodes a clip, samples ordered frames over time, keeps their timestamps and passes them through the vision encoder. Qwen2.5-VL additionally uses dynamic-FPS sampling and temporal position encoding ([official implementation](https://github.com/QwenLM-corp/Qwen2.5-VL), [technical report](https://arxiv.org/abs/2502.13923)). To keep this small model and its sequence format simple, MiniMind-O reuses TIPSv2's image encoder for up to four frames and passes timestamps as text markers to the Thinker. It has no dedicated spatiotemporal encoder or video-supervised training data; this supports video-frame inference but does not imply fully trained temporal video understanding.
 

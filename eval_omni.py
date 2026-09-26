@@ -25,18 +25,21 @@ def init_model(args):
                 num_hidden_layers=args.num_hidden_layers, 
                 use_moe=bool(args.use_moe)
             ),
-            audio_encoder_path="./model/SenseVoiceSmall",
+            audio_encoder_path=None if args.text_only else "./model/SenseVoiceSmall",
             vision_model_path=args.vision_dir
         )
         model.load_state_dict(torch.load(ckp, map_location=args.device), strict=False)
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
-        model.audio_encoder, model.audio_processor = MiniMindOmni.load_sensevoice("./model/SenseVoiceSmall")
+        if args.text_only:
+            model.audio_encoder, model.audio_processor = None, None
+        else:
+            model.audio_encoder, model.audio_processor = MiniMindOmni.load_sensevoice("./model/SenseVoiceSmall")
         model.vision_encoder, model.vision_processor = MiniMindOmni.load_vision(args.vision_dir)
     log_model_params(model)
     if model.audio_encoder is not None: model.audio_encoder.to(args.device)
     if model.vision_encoder is not None: model.vision_encoder.to(args.device)
-    model.mimi_model = MimiModel.from_pretrained("./model/mimi").eval()
+    model.mimi_model = None if args.text_only else MimiModel.from_pretrained("./model/mimi").eval()
     return model.half().eval().to(args.device), tokenizer
 
 
@@ -44,6 +47,15 @@ def eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, output_name, 
     messages = (history or []) + [{"role": "user", "content": prompt}]
     inputs_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, open_thinking=bool(args.open_thinking))
     x = torch.tensor(tokenizer(inputs_text).data['input_ids'], dtype=torch.long, device=args.device)[None, ...]
+
+    if args.text_only:
+        output_ids = model.generate_text(
+            x, eos_token_id=tokenizer.eos_token_id, max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature, top_p=args.top_p, pixel_values=pixel_values,
+        )
+        answer = tokenizer.decode(output_ids[0, x.size(1):].tolist(), skip_special_tokens=True)
+        print('📒 [Thinker]: ', answer, flush=True)
+        return answer
 
     audio_frames = []
     with torch.no_grad():
@@ -108,11 +120,14 @@ def main():
     parser.add_argument('--video_frames', default=4, type=int, help="每个视频均匀采样的帧数")
     parser.add_argument('--vision_dir', default='google/tipsv2-b14', type=str, help="TIPSv2视觉模型 ID 或本地路径")
     parser.add_argument('--open_thinking', default=0, type=int, help="是否开启思考模式（0=否，1=是）（思考模式下禁用audio输出）")
+    parser.add_argument('--text_only', action='store_true', help="仅生成文本，不加载或运行音频模块；适用于文本、图像和视频评估")
     parser.add_argument('--decode_audio', default=1, type=int, help="是否解码音频输出（0=否，1=是）")
     parser.add_argument('--mode', default='0', type=str, help="评估模式：-1=all 0=text 1=multi 2=audio 3=clone 4=image 5=mix 6=video（逗号组合，如 2,5）")
     parser.add_argument('--prompt_lang', default=0, type=int, choices=[0, 1, 2], help="问题语言：0=英文 1=中文 2=英文+中文")
     args = parser.parse_args()
     modes = set(args.mode.replace(',', '').replace('-1', '0123456'))
+    if args.text_only and modes.intersection({'2', '3', '5'}):
+        parser.error("--text_only cannot be combined with audio or mixed-input modes 2, 3, or 5")
     
     os.makedirs(args.output_dir, exist_ok=True)
     model, tokenizer = init_model(args)
