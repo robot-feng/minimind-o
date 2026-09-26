@@ -390,11 +390,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 tra
 ```bash
 python eval_omni.py --weight sft_full_a2a --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_full_a2a.jsonl
 python eval_omni.py --weight sft_i2t_mini --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_i2t_mini.jsonl
-python eval_visual_metrics.py ./out/eval_intermediate/sft_full_a2a.jsonl
-python eval_visual_metrics.py ./out/eval_intermediate/sft_i2t_mini.jsonl
+python eval_visual_metrics.py ./out/eval_intermediate/sft_full_a2a.jsonl --compare ./out/eval_intermediate/sft_i2t_mini.jsonl
 ```
 
-将两个 JSONL 文件按 `source` 对齐可逐张比较原始回答。此 10k 子集用于快速验证视觉训练闭环，不等价于 full 数据训练或发布模型复现。
+最后一条命令会按 `source` 对齐回答，直接报告总体指标变化和逐图回答/概念命中变化。此 10k 子集用于快速验证视觉训练闭环，不等价于 full 数据训练或发布模型复现。
 
 ### MiniMind 训练能力在 MiniMind-O 中的对应入口
 

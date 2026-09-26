@@ -393,11 +393,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 29560 --nproc_per_node 4 tra
 ```bash
 python eval_omni.py --weight sft_full_a2a --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_full_a2a.jsonl
 python eval_omni.py --weight sft_i2t_mini --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_i2t_mini.jsonl
-python eval_visual_metrics.py ./out/eval_intermediate/sft_full_a2a.jsonl
-python eval_visual_metrics.py ./out/eval_intermediate/sft_i2t_mini.jsonl
+python eval_visual_metrics.py ./out/eval_intermediate/sft_full_a2a.jsonl --compare ./out/eval_intermediate/sft_i2t_mini.jsonl
 ```
 
-Align the JSONL files by `source` to compare raw replies. This 10k subset is for quickly validating the visual training path; it is not equivalent to full-data training or reproducing the released model.
+The last command aligns outputs by `source` and reports aggregate metric changes plus per-image answers and concept-hit changes. This 10k subset is for quickly validating the visual training path; it is not equivalent to full-data training or reproducing the released model.
 
 ### MiniMind training capabilities in MiniMind-O
 

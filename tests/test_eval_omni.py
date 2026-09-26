@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import torch
 
 from eval_omni import eval_sample, save_visual_result
-from eval_visual_metrics import score_visual_results
+from eval_visual_metrics import compare_visual_results, score_visual_results
 
 
 class FakeTokenizer:
@@ -151,6 +151,38 @@ class TestVisualMetrics(unittest.TestCase):
 
         self.assertEqual(metrics["evaluated_images"], 0)
         self.assertEqual(metrics["missing_images"], ["expected.jpg"])
+
+    def test_comparison_aligns_answers_by_source_and_reports_deltas(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            references = root / "references.json"
+            references.write_text(json.dumps({
+                "cat.jpg": [
+                    {"concept": "cat", "aliases": ["cat", "猫"]},
+                    {"concept": "moon", "aliases": ["moon", "月亮"]},
+                ],
+                "fruit.jpg": [{"concept": "apple", "aliases": ["apple", "苹果"]}],
+            }), encoding="utf-8")
+            before = root / "before.jsonl"
+            after = root / "after.jsonl"
+            before.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in [
+                {"mode": "image", "source": "cat.jpg", "answer": "猫在月亮下"},
+                {"mode": "image", "source": "fruit.jpg", "answer": "水果"},
+            ]) + "\n", encoding="utf-8")
+            after.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in [
+                {"mode": "image", "source": "fruit.jpg", "answer": "一个苹果"},
+                {"mode": "image", "source": "cat.jpg", "answer": "猫"},
+            ]) + "\n", encoding="utf-8")
+
+            comparison = compare_visual_results(before, after, references)
+
+        self.assertAlmostEqual(comparison["before"]["mean_concept_recall"], 0.5)
+        self.assertAlmostEqual(comparison["after"]["mean_concept_recall"], 0.75)
+        self.assertAlmostEqual(comparison["delta"]["mean_concept_recall"], 0.25)
+        self.assertEqual(comparison["per_image"][0]["source"], "cat.jpg")
+        self.assertEqual(comparison["per_image"][0]["before_answers"], ["猫在月亮下"])
+        self.assertEqual(comparison["per_image"][0]["after_answers"], ["猫"])
+        self.assertAlmostEqual(comparison["per_image"][0]["recall_delta"], -0.5)
 
 
 if __name__ == "__main__":
