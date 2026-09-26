@@ -269,7 +269,7 @@ python eval_visual_metrics.py ./out/eval_intermediate/sft_i2t_mini.jsonl
 
 也可直接调用 `MiniMindOmni.generate_text(..., pixel_values=...)`。视觉输入沿用 `forward` 格式：`{"pixel_values": image_tensor}`、`[B, C, H, W]` 单图张量，或 `[B, F, C, H, W]` 视频帧张量；输入 token 序列需为每张图/每帧保留对应数量的 `<|image_pad|>` 标记。评测与 Web Demo 会把单图扩展到 4 个静态帧槽位；训练数据管线也执行相同扩展，并携带静态标记以复用一次编码结果。该路径只运行 Thinker，可用于单独检查视觉理解。
 
-这种稀疏视频输入遵循常见 VLM 流程：解码视频、按时间采样帧、保留时间戳，并将有序帧交给视觉编码器；短视频会复制最后一帧补齐固定帧数。可参照 [Transformers Video Processor](https://huggingface.co/docs/transformers/main_classes/video_processor) 和 [Qwen2.5-VL](https://github.com/QwenLM-corp/Qwen2.5-VL)。Qwen2.5-VL 还使用动态帧率采样和时间位置编码；MiniMind-O 为保持小模型与现有序列结构简单，复用 TIPSv2 图像编码器处理最多 4 帧，并将时间戳以文本帧标记传入 Thinker。单张静态图扩展为 4 帧后合并回一个图像特征块；真正的视频帧保留逐帧特征。当前没有专门的时空编码器或视频时序监督数据，因此视频输入链路可运行，但模型不代表已学会充分的时序理解。更多细节见 [Qwen2.5-VL 技术报告](https://arxiv.org/abs/2502.13923)。
+这种稀疏视频输入遵循常见 VLM 流程：解码视频、按时间采样帧、保留时间戳，并将有序帧交给视觉编码器；短视频会复制最后一帧补齐固定帧数。可参照 [Transformers Video Processor](https://huggingface.co/docs/transformers/main_classes/video_processor) 和 [Qwen2.5-VL](https://github.com/QwenLM-corp/Qwen2.5-VL)。Qwen2.5-VL 还使用动态帧率采样和时间位置编码；MiniMind-O 为保持小模型与现有序列结构简单，复用 TIPSv2 图像编码器处理最多 4 帧，并将时间戳以文本帧标记传入 Thinker。单张静态图扩展为 4 个静态帧槽位，并在序列中对应 4 个图像特征块；真正的视频帧保留逐帧特征。当前没有专门的时空编码器或视频时序监督数据，因此视频输入链路可运行，但模型不代表已学会充分的时序理解。更多细节见 [Qwen2.5-VL 技术报告](https://arxiv.org/abs/2502.13923)。
 
 # 📌 模型细节
 
