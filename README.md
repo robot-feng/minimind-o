@@ -72,7 +72,7 @@ MiniMind-O 尝试补上已知的空位：让语音和文本在 hidden state 层�
 - 提供 mini 与 full 两套训练数据：mini 便于快速入门，单卡 3090 上约 2 小时可跑通；full 与发布权重对应，覆盖中文语音与图像任务。
 - 提供多种内置音色、unseen 音色与任意参考音频的音色克隆能力，便于复现音色控制实验。
 - 提供完整的推理与 Demo 工具，支持 CLI 推理、Web UI、流式播放、barge-in 打断和电话模式。
-- 图像使用 TIPSv2 B/14；视频输入按时间均匀抽取最多 4 帧，每帧复用相同图像编码路径。
+- 图像使用 TIPSv2 B/14；视频固定为最多 4 帧并复用相同图像编码路径。单张图像在训练和评测中扩展为 4 个静态帧槽位，编码器只计算一次，模型仍使用一个 64-token 图像块，避免伪造时序并保持输入布局一致。
 - 关键模块均从 0 用 PyTorch 原生实现，不依赖三方高层封装；同时兼容 `transformers` Tokenizer 与原生权重格式。
 - 配套技术报告覆盖架构、训练曲线、CER / WER 评估、音色克隆相似度与跨模型对比，链接见顶部 Tech Report 区。
 
@@ -253,9 +253,23 @@ python eval_visual_metrics.py ./out/eval_intermediate/sft_i2t_mini.jsonl
 
 脚本报告平均概念召回率和所有标注概念均命中的图片比例；标注在 `dataset/eval_omni/visual_references.json`。这是小型固定集上的关键词覆盖指标，不衡量幻觉、关系理解或描述流畅度，应同时查看 JSONL 原始回答，不宜外推为通用视觉能力指标。
 
-也可直接调用 `MiniMindOmni.generate_text(..., pixel_values=...)`。视觉输入沿用 `forward` 格式：`{"pixel_values": image_tensor}`、`[B, C, H, W]` 单图张量，或 `[B, F, C, H, W]` 视频帧张量；输入 token 序列需为每张图/每帧保留对应数量的 `<|image_pad|>` 标记。该路径只运行 Thinker，可用于单独检查视觉理解。
+### 中间结果：9 张固定图片（2026-09-27）
 
-这种稀疏视频输入遵循常见 VLM 流程：解码视频、按时间采样帧、保留时间戳，并将有序帧交给视觉编码器；可参照 [Transformers Video Processor](https://huggingface.co/docs/transformers/main_classes/video_processor) 和 [Qwen2.5-VL](https://github.com/QwenLM-corp/Qwen2.5-VL)。Qwen2.5-VL 还使用动态帧率采样和时间位置编码；MiniMind-O 为保持小模型与现有序列结构简单，复用 TIPSv2 图像编码器处理最多 4 帧，并将时间戳以文本帧标记传入 Thinker。当前没有专门的时空编码器，也没有视频监督训练数据，因此这是视频帧输入与推理链路，不代表已具备充分训练的视频时序理解能力。更多细节见 [Qwen2.5-VL 技术报告](https://arxiv.org/abs/2502.13923)。
+| 检查点 | 提示语言 | 图片数 | 平均概念召回率 | 全概念命中 |
+| --- | --- | ---: | ---: | ---: |
+| `sft_full_a2a` | 中文 | 9 | 0.0% | 0/9 |
+| `sft_i2t_mini` | 中文 | 9 | 0.0% | 0/9 |
+| `sft_i2t_mini` | English | 9 | 3.7% | 0/9 |
+
+![中间视觉评估结果](images/visual_eval_interim_20260927.png)
+
+单独的 TIPSv2 编码器在同一组图片的图像专属候选描述检索中 top-1 为 9/9；这不是开放式描述准确率，也不能替代 MiniMind-O 生成评估。对 `sft_i2t_mini_768.pth` 做同提示词的图像消融后，图像输入与无图像输入的最后位置 logits 有明显差异，但橘猫图与水果图的 logits 余弦相似度为 0.999983，贪心下一 token 相同；新四帧静态单图路径相对旧单图路径的最大 logits 差为 0。说明输入通路已接通，静态帧适配没有改变单图数值结果，但视觉信息尚未形成有效的图文语义对齐。
+
+`dataset/sft_i2t_mini.parquet` 只有 10,000 行，约占 2,904,511 行 full I2T 的 0.34%；其中 9,250 行带用户图像标记，约占 full 数据的 0.32%。当前证据更支持视觉语言对齐训练不足，而不是 TIPS 编码器无法识别图片。Dense 完成事件没有收到成功标记，自动流程因此没有产出最终 `sft_omni` 评估；以上均为中间检查点结果，不能作为 full 训练验收结论。
+
+也可直接调用 `MiniMindOmni.generate_text(..., pixel_values=...)`。视觉输入沿用 `forward` 格式：`{"pixel_values": image_tensor}`、`[B, C, H, W]` 单图张量，或 `[B, F, C, H, W]` 视频帧张量；输入 token 序列需为每张图/每帧保留对应数量的 `<|image_pad|>` 标记。评测与 Web Demo 会把单图扩展到 4 个静态帧槽位；训练数据管线也执行相同扩展，并携带静态标记以复用一次编码结果。该路径只运行 Thinker，可用于单独检查视觉理解。
+
+这种稀疏视频输入遵循常见 VLM 流程：解码视频、按时间采样帧、保留时间戳，并将有序帧交给视觉编码器；短视频会复制最后一帧补齐固定帧数。可参照 [Transformers Video Processor](https://huggingface.co/docs/transformers/main_classes/video_processor) 和 [Qwen2.5-VL](https://github.com/QwenLM-corp/Qwen2.5-VL)。Qwen2.5-VL 还使用动态帧率采样和时间位置编码；MiniMind-O 为保持小模型与现有序列结构简单，复用 TIPSv2 图像编码器处理最多 4 帧，并将时间戳以文本帧标记传入 Thinker。单张静态图扩展为 4 帧后合并回一个图像特征块；真正的视频帧保留逐帧特征。当前没有专门的时空编码器或视频时序监督数据，因此视频输入链路可运行，但模型不代表已学会充分的时序理解。更多细节见 [Qwen2.5-VL 技术报告](https://arxiv.org/abs/2502.13923)。
 
 # 📌 模型细节
 
@@ -396,7 +410,7 @@ python eval_visual_metrics.py ./out/eval_intermediate/sft_full_a2a.jsonl --compa
 
 ### MiniMind 训练能力在 MiniMind-O 中的对应入口
 
-MiniMind 上游 `trainer/` 中与语言模型训练相关的能力，已适配到根仓库 `trainer/`，并使用 MiniMind-O 的模型、tokenizer 与 checkpoint 格式。文本预训练、文本 SFT、LoRA、蒸馏和偏好/RL 入口目前只训练 Thinker 文本路径；音频和图像监督通过上面的 `train_sft_omni.py` 完成。视频目前支持均匀抽帧、时间标记和模型推理输入；仓库尚未提供视频监督数据集适配器，因此训练视频时序理解需要先准备相应数据并扩展数据管线。
+MiniMind 上游 `trainer/` 中与语言模型训练相关的能力，已适配到根仓库 `trainer/`，并使用 MiniMind-O 的模型、tokenizer 与 checkpoint 格式。文本预训练、文本 SFT、LoRA、蒸馏和偏好/RL 入口目前只训练 Thinker 文本路径；音频和图像监督通过上面的 `train_sft_omni.py` 完成，单图训练样本扩展到统一的静态帧张量布局。仓库支持真实视频的均匀抽帧和推理输入，但尚未提供视频时序监督数据集，因此模型仍需专门的视频训练数据才能学会时序理解。
 
 | 能力 | MiniMind-O 入口 | 数据文件 / 说明 |
 |---|---|---|

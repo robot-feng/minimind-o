@@ -12,6 +12,7 @@ from scipy.signal import resample
 from torch.utils.data import Dataset
 import pyarrow as pa
 import pyarrow.parquet as pq
+from dataset.video import DEFAULT_VIDEO_FRAMES, repeat_static_image_frames
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -49,8 +50,10 @@ class OmniDataset(Dataset):
                  audio_spk_token=2051,  # <|audio_spk|>
                  audio_vocab_size=2112,  # 2048 mimi codes + 64 special tokens
                  scheduled_sampling=0.05,
-                 image_token_len=64):
+                 image_token_len=64, video_frames=DEFAULT_VIDEO_FRAMES):
         super().__init__()
+        if video_frames < 1:
+            raise ValueError("video_frames must be positive")
         tables = [pa.Table.from_batches(pq.ParquetFile(p.strip()).iter_batches()) for p in data_path.split(',')]
         tables = [t.cast(pa.schema([f.with_type(pa.large_string()) if pa.types.is_string(f.type) else f for f in t.schema])) for t in tables]
         self.table = pa.concat_tables(tables, promote_options='default')
@@ -58,6 +61,7 @@ class OmniDataset(Dataset):
         self.audio_processor = audio_processor
         self.vision_processor = vision_processor
         self.max_length = max_length
+        self.video_frames = video_frames
         self.audio_token = audio_special_token
         self.image_token_len = image_token_len
         self.image_token = image_special_token * image_token_len
@@ -228,11 +232,22 @@ class OmniDataset(Dataset):
                 if len(self.tokenizer(test_prompt).input_ids) + 100 < self.max_length:
                     break
         
-        # 加载最后一个user的图像（按user轮次索引访问，与audio一致）
+        # A still image occupies the same fixed frame axis as video, with its
+        # temporal features marked as static so the encoder runs only once.
         pixel_values = None
-        user_count = sum(1 for t in conversations if t['role'] == 'user')
-        if image_bytes and len(image_bytes) > 0 and self.vision_processor:
+        has_image_marker = any(
+            '<image>' in str(turn.get('content', ''))
+            for turn in conversations if turn.get('role') == 'user'
+        )
+        if has_image_marker and image_bytes and self.vision_processor:
             pixel_values = self.load_image_inputs(image_bytes[0])
+            frame_batch = repeat_static_image_frames(
+                pixel_values['pixel_values'], num_frames=self.video_frames
+            )
+            pixel_values = {
+                'pixel_values': frame_batch.squeeze(0),
+                'static_image_mask': torch.tensor(True),
+            }
         
         # 只加载最后一个user的audio（按user轮次索引访问）
         audio_inputs, audio_len, audio_features_length = None, 0, 0
@@ -252,7 +267,10 @@ class OmniDataset(Dataset):
             audio_len = 0
         if pixel_values is None and self.vision_processor:
             image_size = getattr(self.vision_processor, 'image_size', 256)
-            pixel_values = {'pixel_values': torch.zeros(1, 3, image_size, image_size)}
+            pixel_values = {
+                'pixel_values': torch.zeros(self.video_frames, 3, image_size, image_size),
+                'static_image_mask': torch.tensor(False),
+            }
         
         # 从answer_audios获取最后一个assistant的音频codes
         last_audio_codes = None

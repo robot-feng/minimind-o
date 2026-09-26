@@ -7,6 +7,23 @@ from PIL import Image
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
+DEFAULT_VIDEO_FRAMES = 4
+
+
+def repeat_static_image_frames(pixel_values, num_frames=DEFAULT_VIDEO_FRAMES):
+    """Expand a batch of still images to the shared video-frame layout."""
+    if num_frames < 1:
+        raise ValueError("num_frames must be positive")
+    if pixel_values.ndim != 4:
+        raise ValueError("pixel_values must have shape (batch, channels, height, width)")
+    return pixel_values.unsqueeze(1).expand(-1, num_frames, -1, -1, -1)
+
+
+def format_frame_prompt(image_tokens, timestamps):
+    return "\n\n".join(
+        f"Frame {index} at {timestamp:.2f}s:\n{image_tokens}"
+        for index, timestamp in enumerate(timestamps, start=1)
+    )
 
 
 def sample_video_frames(video_path, num_frames=4):
@@ -39,13 +56,21 @@ def sample_video_frames(video_path, num_frames=4):
 
 def prepare_video_inputs(video_path, vision_processor, config, device="cpu", num_frames=4):
     frames = sample_video_frames(video_path, num_frames=num_frames)
+    if len(frames) < num_frames:
+        frames.extend([frames[-1]] * (num_frames - len(frames)))
     pixel_values = torch.stack([
         vision_processor(images=image, return_tensors="pt")["pixel_values"].squeeze(0)
         for image, _ in frames
     ]).unsqueeze(0).to(device)
     image_tokens = config.image_special_token * config.image_token_len
-    prompt = "\n\n".join(
-        f"Frame {index} at {timestamp:.2f}s:\n{image_tokens}"
-        for index, (_, timestamp) in enumerate(frames, start=1)
-    )
+    prompt = format_frame_prompt(image_tokens, [timestamp for _, timestamp in frames])
     return {"pixel_values": pixel_values}, prompt
+
+
+def prepare_image_inputs(image, vision_processor, config, device="cpu", num_frames=DEFAULT_VIDEO_FRAMES):
+    """Repeat one still image into the same frame tensor shape used by videos."""
+    pixels = vision_processor(images=image, return_tensors="pt")["pixel_values"]
+    frame_batch = repeat_static_image_frames(pixels, num_frames=num_frames).to(device)
+    static_mask = torch.ones(frame_batch.size(0), dtype=torch.bool, device=device)
+    prompt = config.image_special_token * config.image_token_len
+    return {"pixel_values": frame_batch, "static_image_mask": static_mask}, prompt

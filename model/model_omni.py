@@ -258,6 +258,13 @@ class MiniMindOmni(MiniMindForCausalLM):
                 return pool_patch_tokens(patch_tokens, self.config.image_token_len)
             if pixel_values.ndim == 5:
                 batch, frames = pixel_values.shape[:2]
+                static_mask = image_inputs.get('static_image_mask')
+                if static_mask is not None:
+                    static_mask = static_mask.to(device=pixel_values.device, dtype=torch.bool).reshape(batch)
+                if static_mask is not None and static_mask.all():
+                    patch_tokens = self.vision_encoder.encode_image(pixel_values[:, 0]).patch_tokens
+                    pooled = pool_patch_tokens(patch_tokens, self.config.image_token_len)
+                    return pooled.unsqueeze(1).expand(-1, frames, -1, -1)
                 patch_tokens = self.vision_encoder.encode_image(pixel_values.flatten(0, 1)).patch_tokens
                 patch_tokens = pool_patch_tokens(patch_tokens, self.config.image_token_len)
                 return patch_tokens.reshape(batch, frames, self.config.image_token_len, -1)
@@ -266,16 +273,29 @@ class MiniMindOmni(MiniMindForCausalLM):
     @torch.compiler.disable
     def encode_image_inputs(self, pixel_values):
         if pixel_values is None or self.vision_encoder is None: return None
-        mask = pixel_values.flatten(1).any(1)
-        if not mask.any(): return pixel_values.new_zeros(pixel_values.size(0), self.config.image_token_len, self.config.hidden_size)
-        emb = self.get_image_embeddings({'pixel_values': pixel_values[mask]})
+        if isinstance(pixel_values, dict):
+            image_inputs = pixel_values
+            pixels = image_inputs['pixel_values']
+        else:
+            pixels = pixel_values
+            image_inputs = {'pixel_values': pixels}
+        mask = pixels.flatten(1).any(1)
+        if not mask.any():
+            frame_shape = (pixels.size(1), self.config.image_token_len, self.config.hidden_size) if pixels.ndim == 5 else (self.config.image_token_len, self.config.hidden_size)
+            return pixels.new_zeros(pixels.size(0), *frame_shape)
+        valid_inputs = {'pixel_values': pixels[mask]}
+        static_mask = image_inputs.get('static_image_mask')
+        if static_mask is not None:
+            valid_inputs['static_image_mask'] = static_mask.to(mask.device).reshape(-1)[mask]
+        emb = self.get_image_embeddings(valid_inputs)
         emb = self.vision_proj(emb)
         if mask.all(): return emb
-        idx = mask.nonzero().view(-1, 1, 1).expand_as(emb)
-        return emb.new_zeros(pixel_values.size(0), *emb.shape[1:]).scatter(0, idx, emb)
+        idx_shape = (-1,) + (1,) * (emb.ndim - 1)
+        idx = mask.nonzero().view(*idx_shape).expand_as(emb)
+        return emb.new_zeros(pixels.size(0), *emb.shape[1:]).scatter(0, idx, emb)
 
     @torch.compiler.disable
-    def count_vision_proj(self, tokens, h, vision_tensors=None, seqlen=512):
+    def count_vision_proj(self, tokens, h, vision_tensors=None, seqlen=512, static_image_mask=None):
         if vision_tensors is None or not self.config.image_ids:
             return h
         marker, vf = self.config.image_ids[0], vision_tensors
@@ -283,17 +303,37 @@ class MiniMindOmni(MiniMindForCausalLM):
             vf = vf.unsqueeze(1)
         out = []
         for b in range(h.size(0)):
-            hb, seq, k, i = h[b], tokens[b].tolist(), 0, 0
+            hb, seq, spans, i = h[b], tokens[b].tolist(), [], 0
             while i < len(seq):
                 if seq[i] == marker:
                     start = i
                     while i < len(seq) and seq[i] == marker:
                         i += 1
-                    if k < vf.size(1):
-                        hb = torch.cat((hb[:start], vf[b][k][:i - start], hb[i:]), dim=0)[:seqlen]
-                        k += 1
+                    spans.append((start, i))
                 else:
                     i += 1
+            if not spans:
+                out.append(hb)
+                continue
+            features = vf[b]
+            if static_image_mask is not None and bool(static_image_mask[b]):
+                features = features.mean(dim=0, keepdim=True)
+            block_size = self.config.image_token_len
+            frame_spans = []
+            for start, end in spans:
+                span_size = end - start
+                if span_size % block_size:
+                    raise ValueError(f'image marker span has {span_size} tokens; expected multiples of {block_size}')
+                frame_spans.extend(
+                    (start + offset, start + offset + block_size)
+                    for offset in range(0, span_size, block_size)
+                )
+            if len(frame_spans) != features.size(0):
+                raise ValueError(
+                    f'found {len(frame_spans)} image frame markers for {features.size(0)} visual frames'
+                )
+            for frame, (start, end) in enumerate(frame_spans):
+                hb = torch.cat((hb[:start], features[frame], hb[end:]), dim=0)[:seqlen]
             out.append(hb)
         return torch.stack(out)
 
@@ -326,9 +366,10 @@ class MiniMindOmni(MiniMindForCausalLM):
             hidden_states = self.inject_audio_features(text_ids, hidden_states, audio_features, seq_length)
         if pixel_values is not None and start_pos == 0:
             if hasattr(pixel_values, 'keys'):
-                img_emb = self.get_image_embeddings(pixel_values).to(hidden_states.dtype)
-                vision_tensors = self.vision_proj(img_emb)
+                static_image_mask = pixel_values.get('static_image_mask')
+                vision_tensors = self.encode_image_inputs(pixel_values).to(hidden_states.dtype)
             else:
+                static_image_mask = None
                 if len(pixel_values.shape) == 6:
                     pixel_values = pixel_values.squeeze(2)
                 if len(pixel_values.shape) == 4:
@@ -338,7 +379,10 @@ class MiniMindOmni(MiniMindForCausalLM):
                     self.encode_image_inputs(pixel_values[:, i, :, :, :])
                     for i in range(num)
                 ], dim=1)
-            hidden_states = self.count_vision_proj(tokens=text_ids, h=hidden_states, vision_tensors=vision_tensors, seqlen=seq_length)
+            hidden_states = self.count_vision_proj(
+                tokens=text_ids, h=hidden_states, vision_tensors=vision_tensors,
+                seqlen=seq_length, static_image_mask=static_image_mask,
+            )
         bridge_states = hidden_states
         for i, (layer, past_key_value) in enumerate(zip(self.thinker.layers, past_key_values[:n_thinker])):
             hidden_states, present = layer(hidden_states, position_embeddings, past_key_value=past_key_value, use_cache=use_cache, attention_mask=attention_mask)

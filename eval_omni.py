@@ -9,7 +9,7 @@ from PIL import Image
 from transformers import AutoTokenizer, AutoModelForCausalLM, MimiModel
 from model.model_omni import MiniMindOmni, OmniConfig
 from dataset.omni_dataset import OmniDataset
-from dataset.video import VIDEO_EXTENSIONS, prepare_video_inputs
+from dataset.video import DEFAULT_VIDEO_FRAMES, VIDEO_EXTENSIONS, prepare_image_inputs, prepare_video_inputs
 from trainer.audio_output import save_generated_audio
 from trainer.trainer_utils import setup_seed, log_model_params
 warnings.filterwarnings('ignore')
@@ -126,7 +126,7 @@ def main():
     parser.add_argument('--audio_dir', default='./dataset/eval_omni/', type=str, help="测试音频目录")
     parser.add_argument('--image_dir', default='./dataset/eval_omni/', type=str, help="测试图像目录")
     parser.add_argument('--video_dir', default='./dataset/eval_omni/', type=str, help="测试视频目录")
-    parser.add_argument('--video_frames', default=4, type=int, help="每个视频均匀采样的帧数")
+    parser.add_argument('--video_frames', default=DEFAULT_VIDEO_FRAMES, type=int, help="统一视觉帧数；单图复制到该帧数")
     parser.add_argument('--vision_dir', default='google/tipsv2-b14', type=str, help="TIPSv2视觉模型 ID 或本地路径")
     parser.add_argument('--open_thinking', default=0, type=int, help="是否开启思考模式（0=否，1=是）（思考模式下禁用audio输出）")
     parser.add_argument('--text_only', action='store_true', help="仅生成文本，不加载或运行音频模块；适用于文本、图像和视频评估")
@@ -252,10 +252,12 @@ def main():
         for idx, image_file in enumerate(image_files):
             print(f'\n🖼️ [image-{idx+1}]: {image_file}')
             image = Image.open(os.path.join(args.image_dir, image_file)).convert('RGB')
-            pixel_values = {k: v.to(args.device) for k, v in model.vision_processor(images=image, return_tensors="pt").items()}
+            pixel_values, image_frame_prompt = prepare_image_inputs(
+                image, model.vision_processor, model.config, args.device, args.video_frames
+            )
             prompts = [["Please describe this image."], ["请描述这张图片"], ["Please describe this image.", "请描述这张图片"]][args.prompt_lang]
             for lang_idx, prompt_text in enumerate(prompts):
-                prompt = prompt_text + "\n\n" + model.config.image_special_token * model.config.image_token_len
+                prompt = prompt_text + "\n\n" + image_frame_prompt
                 answer = eval_sample(model, tokenizer, args, idx, prompt, None,
                                      f"image-{idx:02d}-{lang_idx}-{os.path.splitext(image_file)[0]}.mp3",
                                      pixel_values=pixel_values)
@@ -269,14 +271,16 @@ def main():
         for idx, image_file in enumerate(image_files):
             audio_file = random.choice(img_audio_files)
             image = Image.open(os.path.join(args.image_dir, image_file)).convert('RGB')
-            pixel_values = {k: v.to(args.device) for k, v in model.vision_processor(images=image, return_tensors="pt").items()}
+            pixel_values, image_frame_prompt = prepare_image_inputs(
+                image, model.vision_processor, model.config, args.device, args.video_frames
+            )
             for lang_idx, text_hint in enumerate(text_hints):
                 print(f'\n🌀 [mix-{idx+1}-{lang_idx}]: {text_hint} | {audio_file} | {image_file}')
                 mel, valid_len = OmniDataset.process_audio(os.path.join(args.audio_dir, audio_file), model.audio_processor)
                 audio_inputs = mel.unsqueeze(0).to(args.device)
                 audio_lens = torch.tensor([valid_len], device=args.device)
                 audio_token_len = valid_len or 1
-                prompt = text_hint + model.config.audio_special_token * audio_token_len + "\n\n" + model.config.image_special_token * model.config.image_token_len
+                prompt = text_hint + model.config.audio_special_token * audio_token_len + "\n\n" + image_frame_prompt
                 eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, f"mix-{idx:02d}-{lang_idx}-{os.path.splitext(image_file)[0]}.mp3", pixel_values=pixel_values, audio_lens=audio_lens)
 
     if '6' in modes:

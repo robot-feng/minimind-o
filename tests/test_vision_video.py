@@ -10,7 +10,12 @@ import torch
 from torch import nn
 from PIL import Image
 
-from dataset.video import prepare_video_inputs, sample_video_frames
+from dataset.video import (
+    prepare_image_inputs,
+    prepare_video_inputs,
+    repeat_static_image_frames,
+    sample_video_frames,
+)
 from model.model_omni import (
     MiniMindOmni,
     OmniConfig,
@@ -49,8 +54,12 @@ class FakeCapture:
 
 
 class FakeTIPSv2:
+    def __init__(self):
+        self.encoded_images = 0
+
     def encode_image(self, pixel_values):
         batch = pixel_values.size(0)
+        self.encoded_images += batch
         tokens = torch.arange(batch * 16 * 3, device=pixel_values.device, dtype=torch.float32)
         return SimpleNamespace(patch_tokens=tokens.reshape(batch, 16, 3))
 
@@ -72,6 +81,27 @@ class TestTIPSv2ImageProcessing(unittest.TestCase):
         self.assertGreaterEqual(pixels.min().item(), 0.0)
         self.assertLessEqual(pixels.max().item(), 1.0)
         self.assertAlmostEqual(pixels[0, 0].mean().item(), 1.0, places=5)
+
+    def test_static_image_repeats_to_video_frame_shape(self):
+        pixels = torch.arange(2 * 3 * 4 * 4).reshape(2, 3, 4, 4)
+        repeated = repeat_static_image_frames(pixels, num_frames=4)
+        self.assertEqual(tuple(repeated.shape), (2, 4, 3, 4, 4))
+        for frame in repeated.unbind(dim=1):
+            torch.testing.assert_close(frame, pixels)
+
+    def test_static_image_frame_count_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "positive"):
+            repeat_static_image_frames(torch.zeros(1, 3, 4, 4), num_frames=0)
+
+    def test_image_preparation_repeats_pixels_but_keeps_one_image_token_block(self):
+        config = SimpleNamespace(image_special_token="<image>", image_token_len=4)
+        pixels, prompt = prepare_image_inputs(
+            Image.new("RGB", (12, 8), "orange"), TIPSv2ImageProcessor(),
+            config, device="cpu", num_frames=4,
+        )
+        self.assertEqual(tuple(pixels["pixel_values"].shape), (1, 4, 3, 448, 448))
+        self.assertEqual(pixels["static_image_mask"].tolist(), [True])
+        self.assertEqual(prompt, "<image>" * 4)
 
     def test_pooling_preserves_grid_layout_and_shape(self):
         tokens = torch.arange(16, dtype=torch.float32).reshape(1, 16, 1)
@@ -150,6 +180,54 @@ class TestVideoInput(unittest.TestCase):
             if not name.startswith("vision_proj.")
         ))
 
+    def test_static_repeated_frames_encode_once_and_align_to_one_image_block(self):
+        config = OmniConfig(
+            hidden_size=12, num_hidden_layers=1, vocab_size=128,
+            num_attention_heads=3, num_key_value_heads=1, intermediate_size=24,
+            talker_hidden_size=16, num_talker_hidden_layers=1,
+            image_hidden_size=3, image_token_len=4, max_position_embeddings=64,
+        )
+        model = MiniMindOmni(config, audio_encoder_path=None, vision_model_path=None).eval()
+        encoder = FakeTIPSv2()
+        object.__setattr__(model, "vision_encoder", encoder)
+        model.vision_proj = nn.Linear(3, config.hidden_size, bias=False)
+        frames = torch.ones(1, 4, 3, 8, 8)
+        static_mask = torch.tensor([True])
+        markers = torch.tensor([[1] + [config.image_ids[0]] * 4 + [7]])
+
+        with torch.inference_mode():
+            vision = model.encode_image_inputs({
+                "pixel_values": frames,
+                "static_image_mask": static_mask,
+            })
+            output = model(
+                markers,
+                pixel_values={"pixel_values": frames, "static_image_mask": static_mask},
+                text_only=True,
+            )
+
+        self.assertEqual(encoder.encoded_images, 2)  # one batch for each forward path
+        self.assertEqual(tuple(vision.shape), (1, 4, 4, config.hidden_size))
+        torch.testing.assert_close(vision[:, 0], vision[:, 3])
+        self.assertEqual(tuple(output.logits.shape[:2]), tuple(markers.shape))
+
+    def test_zero_frame_batch_skips_vision_encoder(self):
+        config = OmniConfig(
+            hidden_size=12, num_hidden_layers=1, vocab_size=128,
+            num_attention_heads=3, num_key_value_heads=1, intermediate_size=24,
+            talker_hidden_size=16, num_talker_hidden_layers=1,
+            image_hidden_size=3, image_token_len=4, max_position_embeddings=64,
+        )
+        model = MiniMindOmni(config, audio_encoder_path=None, vision_model_path=None)
+        encoder = FakeTIPSv2()
+        object.__setattr__(model, "vision_encoder", encoder)
+        result = model.encode_image_inputs({
+            "pixel_values": torch.zeros(2, 4, 3, 8, 8),
+            "static_image_mask": torch.tensor([False, False]),
+        })
+        self.assertEqual(tuple(result.shape), (2, 4, 4, config.hidden_size))
+        self.assertEqual(encoder.encoded_images, 0)
+
     def test_uniform_sampling_keeps_frame_order_and_timestamps(self):
         capture = FakeCapture("sample.avi")
         with patch("dataset.video.cv2.VideoCapture", return_value=capture):
@@ -201,6 +279,17 @@ class TestVideoInput(unittest.TestCase):
         self.assertIn("Frame 1 at 0.00s", prompt)
         self.assertIn("Frame 2 at 1.50s", prompt)
         self.assertIn("Frame 3 at 3.00s", prompt)
+
+    def test_video_preparation_repeats_last_frame_to_fixed_frame_count(self):
+        config = SimpleNamespace(image_special_token="<image>", image_token_len=4)
+        capture = FakeCapture("sample.avi")
+        with patch("dataset.video.cv2.VideoCapture", return_value=capture):
+            pixels, prompt = prepare_video_inputs(
+                "sample.avi", TIPSv2ImageProcessor(), config, device="cpu", num_frames=10
+            )
+        self.assertEqual(tuple(pixels["pixel_values"].shape), (1, 10, 3, 448, 448))
+        self.assertEqual(prompt.count("<image>"), 40)
+        torch.testing.assert_close(pixels["pixel_values"][:, 6], pixels["pixel_values"][:, 9])
 
     def test_sampler_decodes_a_real_video_file(self):
         with tempfile.TemporaryDirectory() as directory:

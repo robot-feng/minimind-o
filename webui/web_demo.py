@@ -9,6 +9,7 @@ from pydub import AudioSegment
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from model.model_omni import MiniMindOmni, RealtimeSession
+from dataset.video import DEFAULT_VIDEO_FRAMES, repeat_static_image_frames
 from trainer.trainer_utils import log_model_params
 logging.getLogger().setLevel(logging.ERROR)
 with contextlib.redirect_stdout(io.StringIO()):
@@ -57,7 +58,11 @@ def prep_audio(samples):
 
 def prep_image(b64):
     img = Image.open(io.BytesIO(base64.b64decode(b64))).convert('RGB')
-    return {k: v.to(M['device']) for k, v in M['model'].vision_processor(images=img, return_tensors="pt").items()}
+    pixels = M['model'].vision_processor(images=img, return_tensors="pt")["pixel_values"]
+    return {
+        'pixel_values': repeat_static_image_frames(pixels, DEFAULT_VIDEO_FRAMES).to(M['device']),
+        'static_image_mask': torch.ones(1, dtype=torch.bool, device=M['device']),
+    }
 
 def build_ids(prompt, history):
     tok, dev, n = M['tokenizer'], M['device'], M['cfg'].max_history_turns

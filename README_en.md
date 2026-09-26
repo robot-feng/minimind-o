@@ -71,7 +71,7 @@ MiniMind-O attempts to fill this gap: speech and text are connected directly at 
 - Two training datasets, `mini` and `full`. `mini` is meant for quick onboarding and runs the pipeline in ~2 hours on a single RTX 3090; `full` matches the released weights and covers Chinese speech and image tasks.
 - Multiple built-in voice prompts, unseen voice prompts and voice cloning from arbitrary reference audio, making voice-control experiments easy to reproduce.
 - A complete inference and demo toolkit: CLI, Web UI, streaming playback, barge-in interruption and a phone-mode demo.
-- Uses TIPSv2 B/14 for images; video inputs are uniformly sampled to at most 4 frames and reuse the image encoder.
+- Uses TIPSv2 B/14 for images; video inputs use up to 4 frames and reuse the image encoder. A still image is expanded into four static frame slots during training and evaluation, encoded once, then collapsed to one 64-token image block so the model does not receive fabricated temporal changes.
 - Key modules are written from scratch in native PyTorch without high-level third-party wrappers, while remaining compatible with `transformers` tokenizers and native weight formats.
 - A companion technical report covers architecture, training curves, CER / WER evaluation, voice-cloning similarity and cross-model comparisons. See the Tech Report badge at the top.
 
@@ -254,9 +254,23 @@ python eval_visual_metrics.py ./out/eval_intermediate/sft_i2t_mini.jsonl
 
 The script reports mean concept recall and the fraction of images with every annotated concept hit. Labels are in `dataset/eval_omni/visual_references.json`. This keyword-coverage metric is limited to a small fixed set; it does not measure hallucinations, relations or fluency. Inspect the JSONL answers as well, and do not treat this as a general visual-capability score.
 
-You can also call `MiniMindOmni.generate_text(..., pixel_values=...)` directly. It accepts the same visual input formats as `forward`: `{"pixel_values": image_tensor}`, a `[B, C, H, W]` image tensor, or a `[B, F, C, H, W]` video-frame tensor. The input token sequence must contain one matching `<|image_pad|>` block per image or frame. This path runs only the Thinker and is useful for isolating visual understanding.
+### Interim results on the 9-image set (2026-09-27)
 
-Following common VLM practice, the video path decodes a clip, samples ordered frames over time, keeps their timestamps and passes them through the vision encoder. Qwen2.5-VL additionally uses dynamic-FPS sampling and temporal position encoding ([official implementation](https://github.com/QwenLM-corp/Qwen2.5-VL), [technical report](https://arxiv.org/abs/2502.13923)). To keep this small model and its sequence format simple, MiniMind-O reuses TIPSv2's image encoder for up to four frames and passes timestamps as text markers to the Thinker. It has no dedicated spatiotemporal encoder or video-supervised training data; this supports video-frame inference but does not imply fully trained temporal video understanding.
+| Checkpoint | Prompt | Images | Mean concept recall | All concepts hit |
+| --- | --- | ---: | ---: | ---: |
+| `sft_full_a2a` | Chinese | 9 | 0.0% | 0/9 |
+| `sft_i2t_mini` | Chinese | 9 | 0.0% | 0/9 |
+| `sft_i2t_mini` | English | 9 | 3.7% | 0/9 |
+
+![Interim visual evaluation](images/visual_eval_interim_20260927.png)
+
+The standalone TIPSv2 encoder ranks each image's matching caption first (9/9) among image-specific candidates. This is a small retrieval diagnostic, not open-ended caption accuracy or a substitute for MiniMind-O generation evaluation. With `sft_i2t_mini_768.pth` and the same prompt, image input changes the final-position logits compared with no image, but the orange-cat and fruit images produce logits with cosine similarity 0.999983 and the same greedy next token. The new four-slot static-image path matches the legacy single-image path exactly (maximum logit difference 0). The input path is connected, while the model has not learned useful image-to-language semantics.
+
+`dataset/sft_i2t_mini.parquet` contains 10,000 rows, about 0.34% of the 2,904,511-row full I2T dataset; 9,250 rows contain a user image marker, about 0.32% of full I2T. Current evidence points more strongly to insufficient visual-language alignment training than to a TIPS encoder that cannot recognize the images. The Dense completion event did not receive a success sentinel, so the automatic workflow did not produce a final `sft_omni` evaluation. These are interim checkpoint results, not a full-training acceptance result.
+
+You can also call `MiniMindOmni.generate_text(..., pixel_values=...)` directly. It accepts the same visual input formats as `forward`: `{"pixel_values": image_tensor}`, a `[B, C, H, W]` image tensor, or a `[B, F, C, H, W]` video-frame tensor. The input token sequence must contain one matching `<|image_pad|>` block per image or frame. Evaluation and the Web Demo expand a still image to four static frame slots; training uses the same layout and a static-image mask to reuse one encoder result. This path runs only the Thinker and is useful for isolating visual understanding.
+
+Following common VLM practice, the video path decodes a clip, samples ordered frames over time, keeps their timestamps and passes them through the vision encoder. Short clips repeat the final frame to reach the fixed frame count. Qwen2.5-VL additionally uses dynamic-FPS sampling and temporal position encoding ([official implementation](https://github.com/QwenLM-corp/Qwen2.5-VL), [technical report](https://arxiv.org/abs/2502.13923)). To keep this small model and its sequence format simple, MiniMind-O reuses TIPSv2's image encoder for up to four frames and passes timestamps as text markers to the Thinker. A still image expands to four static frame slots and collapses back to one visual block; real video frames retain separate features. The repository has no temporal video supervision, so video input support alone does not imply learned temporal understanding.
 
 # 📌 Model Details
 
@@ -399,7 +413,7 @@ The last command aligns outputs by `source` and reports aggregate metric changes
 
 ### MiniMind training capabilities in MiniMind-O
 
-The language-model training capabilities from upstream MiniMind's `trainer/` have been adapted under the root `trainer/` directory to use MiniMind-O's model, tokenizer and checkpoint formats. Text pretraining, text SFT, LoRA, distillation and preference/RL currently train only the Thinker text path. Audio and image supervision use `train_sft_omni.py` above. Video inputs currently support uniform frame sampling, timestamps and model inference; the repository does not yet include a video-supervised dataset adapter, so training temporal video understanding requires adding suitable data and extending the data pipeline.
+The language-model training capabilities from upstream MiniMind's `trainer/` have been adapted under the root `trainer/` directory to use MiniMind-O's model, tokenizer and checkpoint formats. Text pretraining, text SFT, LoRA, distillation and preference/RL currently train only the Thinker text path. Audio and image supervision use `train_sft_omni.py` above; still images are expanded to the same static frame tensor layout used by evaluation. Real video inputs support uniform frame sampling, timestamps and inference, but there is no video-temporal supervision dataset yet.
 
 | Capability | MiniMind-O entry point | Data / notes |
 |---|---|---|
