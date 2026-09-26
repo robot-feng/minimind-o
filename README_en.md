@@ -71,7 +71,7 @@ MiniMind-O attempts to fill this gap: speech and text are connected directly at 
 - Two training datasets, `mini` and `full`. `mini` is meant for quick onboarding and runs the pipeline in ~2 hours on a single RTX 3090; `full` matches the released weights and covers Chinese speech and image tasks.
 - Multiple built-in voice prompts, unseen voice prompts and voice cloning from arbitrary reference audio, making voice-control experiments easy to reproduce.
 - A complete inference and demo toolkit: CLI, Web UI, streaming playback, barge-in interruption and a phone-mode demo.
-- Uses TIPSv2 B/14 for images; video inputs use up to 4 frames and reuse the image encoder. A still image is expanded into four static frame slots during training and evaluation, encoded once, then collapsed to one 64-token image block so the model does not receive fabricated temporal changes.
+- Uses TIPSv2 B/14 for images; video inputs use up to 4 frames and reuse the image encoder. A still image is aligned to four static frame slots during training, evaluation and inference: it is encoded once and its features are reused across four 64-token image blocks. Real video inputs retain separate per-frame features.
 - Key modules are written from scratch in native PyTorch without high-level third-party wrappers, while remaining compatible with `transformers` tokenizers and native weight formats.
 - A companion technical report covers architecture, training curves, CER / WER evaluation, voice-cloning similarity and cross-model comparisons. See the Tech Report badge at the top.
 
