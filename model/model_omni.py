@@ -316,8 +316,6 @@ class MiniMindOmni(MiniMindForCausalLM):
                 out.append(hb)
                 continue
             features = vf[b]
-            if static_image_mask is not None and bool(static_image_mask[b]):
-                features = features.mean(dim=0, keepdim=True)
             block_size = self.config.image_token_len
             frame_spans = []
             for start, end in spans:
@@ -328,6 +326,12 @@ class MiniMindOmni(MiniMindForCausalLM):
                     (start + offset, start + offset + block_size)
                     for offset in range(0, span_size, block_size)
                 )
+            if static_image_mask is not None and bool(static_image_mask[b]) and features.size(0) == 1:
+                # Rank-4 legacy callers may provide one encoded still for several frame slots.
+                features = features.expand(len(frame_spans), -1, -1)
+            elif static_image_mask is not None and bool(static_image_mask[b]) and len(frame_spans) == 1:
+                # Keep older one-block prompts loadable while new prompts align every frame.
+                features = features[:1]
             if len(frame_spans) != features.size(0):
                 raise ValueError(
                     f'found {len(frame_spans)} image frame markers for {features.size(0)} visual frames'

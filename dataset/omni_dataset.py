@@ -12,7 +12,7 @@ from scipy.signal import resample
 from torch.utils.data import Dataset
 import pyarrow as pa
 import pyarrow.parquet as pq
-from dataset.video import DEFAULT_VIDEO_FRAMES, repeat_static_image_frames
+from dataset.video import DEFAULT_VIDEO_FRAMES, format_static_image_prompt, repeat_static_image_frames
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -65,6 +65,7 @@ class OmniDataset(Dataset):
         self.audio_token = audio_special_token
         self.image_token_len = image_token_len
         self.image_token = image_special_token * image_token_len
+        self.image_frame_prompt = format_static_image_prompt(self.image_token, video_frames)
         self.audio_stop_token = audio_stop_token
         self.audio_pad_token = audio_pad_token
         self.audio_spk_token = audio_spk_token
@@ -286,7 +287,7 @@ class OmniDataset(Dataset):
         
         # 生成prompt (text input_ids)
         prompt = self.create_chat_prompt(conversations, audio_features_length)
-        if pixel_values is not None: prompt = prompt.replace('<image>', self.image_token)
+        if pixel_values is not None: prompt = prompt.replace('<image>', self.image_frame_prompt)
         input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
         
         # PAD input_ids到max_length

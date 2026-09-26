@@ -93,7 +93,7 @@ class TestTIPSv2ImageProcessing(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive"):
             repeat_static_image_frames(torch.zeros(1, 3, 4, 4), num_frames=0)
 
-    def test_image_preparation_repeats_pixels_but_keeps_one_image_token_block(self):
+    def test_image_preparation_repeats_pixels_and_token_blocks_for_each_frame(self):
         config = SimpleNamespace(image_special_token="<image>", image_token_len=4)
         pixels, prompt = prepare_image_inputs(
             Image.new("RGB", (12, 8), "orange"), TIPSv2ImageProcessor(),
@@ -101,7 +101,8 @@ class TestTIPSv2ImageProcessing(unittest.TestCase):
         )
         self.assertEqual(tuple(pixels["pixel_values"].shape), (1, 4, 3, 448, 448))
         self.assertEqual(pixels["static_image_mask"].tolist(), [True])
-        self.assertEqual(prompt, "<image>" * 4)
+        self.assertEqual(prompt.count("<image>"), 16)
+        self.assertEqual(len(prompt.split("\n\n")), 4)
 
     def test_pooling_preserves_grid_layout_and_shape(self):
         tokens = torch.arange(16, dtype=torch.float32).reshape(1, 16, 1)
@@ -180,7 +181,7 @@ class TestVideoInput(unittest.TestCase):
             if not name.startswith("vision_proj.")
         ))
 
-    def test_static_repeated_frames_encode_once_and_align_to_one_image_block(self):
+    def test_static_repeated_frames_encode_once_and_align_to_each_frame_token_block(self):
         config = OmniConfig(
             hidden_size=12, num_hidden_layers=1, vocab_size=128,
             num_attention_heads=3, num_key_value_heads=1, intermediate_size=24,
@@ -193,7 +194,7 @@ class TestVideoInput(unittest.TestCase):
         model.vision_proj = nn.Linear(3, config.hidden_size, bias=False)
         frames = torch.ones(1, 4, 3, 8, 8)
         static_mask = torch.tensor([True])
-        markers = torch.tensor([[1] + [config.image_ids[0]] * 4 + [7]])
+        markers = torch.tensor([[1] + [config.image_ids[0]] * 16 + [7]])
 
         with torch.inference_mode():
             vision = model.encode_image_inputs({
@@ -210,6 +211,17 @@ class TestVideoInput(unittest.TestCase):
         self.assertEqual(tuple(vision.shape), (1, 4, 4, config.hidden_size))
         torch.testing.assert_close(vision[:, 0], vision[:, 3])
         self.assertEqual(tuple(output.logits.shape[:2]), tuple(markers.shape))
+
+    def test_static_features_route_to_all_repeated_image_frame_blocks(self):
+        model = make_model(image_token_len=2)
+        tokens = torch.tensor([[99] * 8])
+        hidden = torch.zeros(1, 8, 3)
+        frames = torch.stack([torch.full((2, 3), float(i)) for i in range(4)]).unsqueeze(0)
+        output = model.count_vision_proj(
+            tokens, hidden, frames, seqlen=8, static_image_mask=torch.tensor([True])
+        )
+        for frame in range(4):
+            torch.testing.assert_close(output[0, frame * 2:(frame + 1) * 2], frames[0, frame])
 
     def test_zero_frame_batch_skips_vision_encoder(self):
         config = OmniConfig(

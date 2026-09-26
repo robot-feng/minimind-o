@@ -9,7 +9,7 @@ from pydub import AudioSegment
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from model.model_omni import MiniMindOmni, RealtimeSession
-from dataset.video import DEFAULT_VIDEO_FRAMES, repeat_static_image_frames
+from dataset.video import DEFAULT_VIDEO_FRAMES, format_static_image_prompt, repeat_static_image_frames
 from trainer.trainer_utils import log_model_params
 logging.getLogger().setLevel(logging.ERROR)
 with contextlib.redirect_stdout(io.StringIO()):
@@ -241,7 +241,9 @@ def prepare_turn(text, samples, image_b64, do_asr_for_image):
     if image_b64:
         pixel_values = prep_image(image_b64)
         m = M['model']
-        prompt = (prompt + "\n\n" if prompt else "") + "请描述这张图片\n\n" + m.config.image_special_token * m.config.image_token_len
+        image_tokens = m.config.image_special_token * m.config.image_token_len
+        image_frame_prompt = format_static_image_prompt(image_tokens, DEFAULT_VIDEO_FRAMES)
+        prompt = (prompt + "\n\n" if prompt else "") + "请描述这张图片\n\n" + image_frame_prompt
     return audio_inputs, audio_lens, pixel_values, prompt, user_text, asr_thread, asr_result
 
 # -------- routes --------

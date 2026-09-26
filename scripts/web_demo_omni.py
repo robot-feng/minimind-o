@@ -22,7 +22,7 @@ from pydub import AudioSegment
 from transformers import AutoTokenizer, AutoModelForCausalLM, MimiModel, TextStreamer
 from model.model_omni import MiniMindOmni, OmniConfig
 from dataset.omni_dataset import OmniDataset
-from dataset.video import VIDEO_EXTENSIONS, prepare_video_inputs
+from dataset.video import VIDEO_EXTENSIONS, prepare_image_inputs, prepare_video_inputs
 from trainer.trainer_utils import setup_seed, log_model_params
 logging.getLogger().setLevel(logging.ERROR)
 with contextlib.redirect_stdout(io.StringIO()):
@@ -172,8 +172,10 @@ def chat_stream(prompt, audio_input=None, image_input=None, voice_name="default"
             prompt = (prompt + "\n\n" if prompt else "") + frame_prompt
         else:
             image = Image.open(image_input).convert('RGB') if isinstance(image_input, str) else image_input.convert('RGB')
-            pixel_values = {k: v.to(device) for k, v in model.vision_processor(images=image, return_tensors="pt").items()}
-            prompt = (prompt + "\n\n" if prompt else "") + model.config.image_special_token * model.config.image_token_len
+            pixel_values, image_frame_prompt = prepare_image_inputs(
+                image, model.vision_processor, model.config, device
+            )
+            prompt = (prompt + "\n\n" if prompt else "") + image_frame_prompt
 
     if voice_name != "default" and voice_name in voices_data:
         v = voices_data[voice_name]

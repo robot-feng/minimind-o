@@ -26,6 +26,13 @@ def format_frame_prompt(image_tokens, timestamps):
     )
 
 
+def format_static_image_prompt(image_tokens, num_frames=DEFAULT_VIDEO_FRAMES):
+    """Give a still image one visual token block for every shared frame slot."""
+    if num_frames < 1:
+        raise ValueError("num_frames must be positive")
+    return "\n\n".join([image_tokens] * num_frames)
+
+
 def sample_video_frames(video_path, num_frames=4):
     if num_frames < 1:
         raise ValueError("num_frames must be positive")
@@ -72,5 +79,6 @@ def prepare_image_inputs(image, vision_processor, config, device="cpu", num_fram
     pixels = vision_processor(images=image, return_tensors="pt")["pixel_values"]
     frame_batch = repeat_static_image_frames(pixels, num_frames=num_frames).to(device)
     static_mask = torch.ones(frame_batch.size(0), dtype=torch.bool, device=device)
-    prompt = config.image_special_token * config.image_token_len
+    image_tokens = config.image_special_token * config.image_token_len
+    prompt = format_static_image_prompt(image_tokens, num_frames)
     return {"pixel_values": frame_batch, "static_image_mask": static_mask}, prompt

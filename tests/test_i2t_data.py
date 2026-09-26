@@ -87,18 +87,18 @@ class TestI2TTrainingDataset(unittest.TestCase):
             tokenizer = AutoTokenizer.from_pretrained(Path(__file__).resolve().parents[1] / "model")
             dataset = OmniDataset(
                 str(path), tokenizer, audio_processor=None,
-                vision_processor=FakeVisionProcessor(), max_length=128,
+                vision_processor=FakeVisionProcessor(), max_length=384,
                 scheduled_sampling=0,
             )
 
             input_ids, labels, _, audio_inputs, _, pixels, _ = dataset[0]
 
-        self.assertEqual(tuple(input_ids.shape), (9, 127))
+        self.assertEqual(tuple(input_ids.shape), (9, 383))
         self.assertGreater((labels != -100).sum().item(), 0)
         self.assertIsNone(audio_inputs)
         self.assertEqual(tuple(pixels["pixel_values"].shape), (4, 3, 32, 32))
         self.assertTrue(pixels["static_image_mask"].item())
-        self.assertEqual((input_ids[-1] == dataset.image_token_id).sum().item(), 64)
+        self.assertEqual((input_ids[-1] == dataset.image_token_id).sum().item(), 64 * 4)
 
     def test_image_bytes_without_image_marker_use_zero_video_frames(self):
         with tempfile.TemporaryDirectory() as directory:
