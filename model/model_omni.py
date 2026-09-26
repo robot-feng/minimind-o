@@ -386,8 +386,8 @@ class MiniMindOmni(MiniMindForCausalLM):
 
     @torch.inference_mode()
     def generate_text(self, input_ids, attention_mask=None, max_new_tokens=256, temperature=0.8,
-                      top_p=0.95, eos_token_id=2, pad_token_id=0):
-        """Generate batched text without running the audio Talker path."""
+                      top_p=0.95, eos_token_id=2, pad_token_id=0, pixel_values=None):
+        """Generate text without the audio Talker, optionally conditioned on images or video frames."""
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape (batch, sequence)")
         if temperature < 0 or not 0 < top_p <= 1:
@@ -402,7 +402,7 @@ class MiniMindOmni(MiniMindForCausalLM):
             output_ids = input_ids
             finished = torch.zeros(input_ids.size(0), dtype=torch.bool, device=input_ids.device)
             result = self(input_ids, attention_mask=attention_mask, use_cache=True,
-                          logits_to_keep=1, text_only=True)
+                          logits_to_keep=1, text_only=True, pixel_values=pixel_values)
             past_key_values = result.past_key_values
             logits = result.logits[:, -1].float()
             for step in range(max_new_tokens):

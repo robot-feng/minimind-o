@@ -217,6 +217,53 @@ class TestVideoInput(unittest.TestCase):
                 (batch_size, input_ids.size(1), config.vocab_size),
             )
 
+    def test_text_generation_accepts_image_inputs_without_talker(self):
+        config = OmniConfig(
+            hidden_size=12, num_hidden_layers=1, vocab_size=128,
+            num_attention_heads=3, num_key_value_heads=1, intermediate_size=24,
+            talker_hidden_size=16, num_talker_hidden_layers=1,
+            image_hidden_size=3, image_token_len=4, max_position_embeddings=64,
+        )
+        model = MiniMindOmni(config, audio_encoder_path=None, vision_model_path=None).eval()
+        object.__setattr__(model, "vision_encoder", FakeTIPSv2())
+        model.vision_proj = nn.Linear(3, config.hidden_size, bias=False)
+        input_ids = torch.tensor([[1] + [config.image_ids[0]] * 4 + [7]])
+        pixels = {"pixel_values": torch.ones(1, 3, 8, 8)}
+
+        with patch.object(model, "get_image_embeddings", wraps=model.get_image_embeddings) as encode:
+            output = model.generate_text(
+                input_ids, max_new_tokens=2, temperature=0, pixel_values=pixels
+            )
+
+        self.assertEqual(tuple(output.shape[:1]), (1,))
+        self.assertGreater(output.size(1), input_ids.size(1))
+        encode.assert_called_once()
+        self.assertEqual(tuple(encode.call_args.args[0]["pixel_values"].shape), (1, 3, 8, 8))
+
+    def test_text_generation_accepts_video_frame_inputs(self):
+        config = OmniConfig(
+            hidden_size=12, num_hidden_layers=1, vocab_size=128,
+            num_attention_heads=3, num_key_value_heads=1, intermediate_size=24,
+            talker_hidden_size=16, num_talker_hidden_layers=1,
+            image_hidden_size=3, image_token_len=4, max_position_embeddings=64,
+        )
+        model = MiniMindOmni(config, audio_encoder_path=None, vision_model_path=None).eval()
+        object.__setattr__(model, "vision_encoder", FakeTIPSv2())
+        model.vision_proj = nn.Linear(3, config.hidden_size, bias=False)
+        input_ids = torch.tensor([[1] + [config.image_ids[0]] * 4 + [7]
+                                  + [config.image_ids[0]] * 4 + [8]])
+        pixels = {"pixel_values": torch.ones(1, 2, 3, 8, 8)}
+
+        with patch.object(model, "get_image_embeddings", wraps=model.get_image_embeddings) as encode:
+            output = model.generate_text(
+                input_ids, max_new_tokens=2, temperature=0, pixel_values=pixels
+            )
+
+        self.assertEqual(tuple(output.shape[:1]), (1,))
+        self.assertGreater(output.size(1), input_ids.size(1))
+        encode.assert_called_once()
+        self.assertEqual(tuple(encode.call_args.args[0]["pixel_values"].shape), (1, 2, 3, 8, 8))
+
 
 @unittest.skipUnless(os.environ.get("MINIMIND_RUN_TIPSV2_INTEGRATION") == "1",
                      "set MINIMIND_RUN_TIPSV2_INTEGRATION=1 to load the real TIPSv2 checkpoint")
@@ -270,12 +317,17 @@ class TestTIPSv2Checkpoint(unittest.TestCase):
         ):
             with torch.inference_mode():
                 output = model(input_ids, pixel_values=pixel_values, text_only=True)
+                text_generated = model.generate_text(
+                    input_ids, eos_token_id=2, max_new_tokens=1, temperature=0,
+                    pixel_values=pixel_values,
+                )
                 generated = list(model.generate(
                     input_ids, eos_token_id=2, max_new_tokens=1,
                     temperature=0.8, top_p=1.0, stream=True,
                     pixel_values=pixel_values,
                 ))
             self.assertEqual(output.logits.shape[:2], input_ids.shape)
+            self.assertEqual(tuple(text_generated.shape), (1, input_ids.size(1) + 1))
             self.assertEqual(len(generated), 1)
             self.assertEqual(tuple(generated[0][0].shape), (1, 1))
 
