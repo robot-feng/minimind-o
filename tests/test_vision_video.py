@@ -11,6 +11,7 @@ from torch import nn
 from PIL import Image
 
 from dataset.video import (
+    format_visual_prompt,
     prepare_image_inputs,
     prepare_video_inputs,
     repeat_static_image_frames,
@@ -142,6 +143,10 @@ class TestTIPSv2ImageProcessing(unittest.TestCase):
 
 
 class TestVideoInput(unittest.TestCase):
+    def test_visual_prompt_precedes_user_text(self):
+        self.assertEqual(format_visual_prompt("  <image>  ", "  describe this  "), "<image>\n\ndescribe this")
+        self.assertEqual(format_visual_prompt("<frames>", ""), "<frames>")
+
     def test_vision_projector_receives_gradients_without_talker(self):
         config = OmniConfig(
             hidden_size=12, num_hidden_layers=1, vocab_size=128,

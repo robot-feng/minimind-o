@@ -9,7 +9,7 @@ from PIL import Image
 from transformers import AutoTokenizer, AutoModelForCausalLM, MimiModel
 from model.model_omni import MiniMindOmni, OmniConfig
 from dataset.omni_dataset import OmniDataset
-from dataset.video import DEFAULT_VIDEO_FRAMES, VIDEO_EXTENSIONS, prepare_image_inputs, prepare_video_inputs
+from dataset.video import DEFAULT_VIDEO_FRAMES, VIDEO_EXTENSIONS, format_visual_prompt, prepare_image_inputs, prepare_video_inputs
 from trainer.audio_output import save_generated_audio
 from trainer.trainer_utils import setup_seed, log_model_params
 warnings.filterwarnings('ignore')
@@ -268,7 +268,7 @@ def main():
             )
             prompts = [["Please describe this image."], ["请描述这张图片"], ["Please describe this image.", "请描述这张图片"]][args.prompt_lang]
             for lang_idx, prompt_text in enumerate(prompts):
-                prompt = prompt_text + "\n\n" + image_frame_prompt
+                prompt = format_visual_prompt(image_frame_prompt, prompt_text)
                 answer = eval_sample(model, tokenizer, args, idx, prompt, None,
                                      f"image-{idx:02d}-{lang_idx}-{os.path.splitext(image_file)[0]}.mp3",
                                      pixel_values=pixel_values)
@@ -291,7 +291,9 @@ def main():
                 audio_inputs = mel.unsqueeze(0).to(args.device)
                 audio_lens = torch.tensor([valid_len], device=args.device)
                 audio_token_len = valid_len or 1
-                prompt = text_hint + model.config.audio_special_token * audio_token_len + "\n\n" + image_frame_prompt
+                prompt = format_visual_prompt(
+                    image_frame_prompt, text_hint + model.config.audio_special_token * audio_token_len
+                )
                 eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, f"mix-{idx:02d}-{lang_idx}-{os.path.splitext(image_file)[0]}.mp3", pixel_values=pixel_values, audio_lens=audio_lens)
 
     if '6' in modes:
@@ -305,7 +307,7 @@ def main():
                 video_path, model.vision_processor, model.config, args.device, args.video_frames
             )
             for lang_idx, prompt_text in enumerate(prompts):
-                prompt = f"{prompt_text}\n\n{frame_prompt}"
+                prompt = format_visual_prompt(frame_prompt, prompt_text)
                 answer = eval_sample(model, tokenizer, args, idx, prompt, None,
                                      f"video-{idx:02d}-{lang_idx}-{os.path.splitext(video_file)[0]}.mp3",
                                      pixel_values=pixel_values)

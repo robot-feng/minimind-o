@@ -33,6 +33,13 @@ def format_static_image_prompt(image_tokens, num_frames=DEFAULT_VIDEO_FRAMES):
     return "\n\n".join([image_tokens] * num_frames)
 
 
+def format_visual_prompt(visual_prompt, text_prompt=""):
+    """Place image or video frame markers before text, matching the training layout."""
+    visual_prompt = visual_prompt.strip()
+    text_prompt = text_prompt.strip()
+    return f"{visual_prompt}\n\n{text_prompt}" if text_prompt else visual_prompt
+
+
 def sample_video_frames(video_path, num_frames=4):
     if num_frames < 1:
         raise ValueError("num_frames must be positive")

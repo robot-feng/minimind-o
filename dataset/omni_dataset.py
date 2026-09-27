@@ -76,6 +76,7 @@ class OmniDataset(Dataset):
         self.audio_token_id = tokenizer.encode(audio_special_token, add_special_tokens=False)[0]
         self.think_end_ids = tokenizer.encode('</think>\n\n', add_special_tokens=False)
         self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids
+        self.user_start_ids = tokenizer(f'{tokenizer.bos_token}user\n', add_special_tokens=False).input_ids
         self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids
 
     def __len__(self):
@@ -157,7 +158,7 @@ class OmniDataset(Dataset):
         if hasattr(inputs, 'keys'): return {k: v for k, v in inputs.items()}
         return inputs.pixel_values
 
-    def create_chat_prompt(self, conversations, audio_features_length=0):
+    def create_chat_prompt(self, conversations, audio_features_length=0, image_first=False):
         conversations = pre_processing_chat(conversations)
         messages = []
         is_last_user = lambda i: i == max(j for j, t in enumerate(conversations) if t['role'] == 'user')
@@ -171,14 +172,89 @@ class OmniDataset(Dataset):
                 elif r < 0.8: content = ap + '\n\n' + content
                 else: content = content + '\n\n' + ap
             if '<image>' in content:
-                r = random.random()
-                if r < 0.2: content = '<image>\n' + content.replace('<image>', '').strip()
-                elif r < 0.4: content = '<image>\n\n' + content.replace('<image>', '').strip()
-                elif r < 0.6: content = content.replace('<image>', '').strip() + '\n' + '<image>'
-                else: content = content.replace('<image>', '').strip() + '\n\n' + '<image>'
+                text = content.replace('<image>', '').strip()
+                if image_first:
+                    content = '<image>\n' + text
+                else:
+                    r = random.random()
+                    if r < 0.2: content = '<image>\n' + text
+                    elif r < 0.4: content = '<image>\n\n' + text
+                    elif r < 0.6: content = text + '\n<image>'
+                    else: content = text + '\n\n<image>'
             messages.append({"role": role, "content": content})
         prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
         return post_processing_chat(prompt)
+
+    def fit_visual_sequence(self, input_ids):
+        """Keep complete image blocks and the final supervised answer within the context limit."""
+        if len(input_ids) <= self.max_length:
+            return input_ids
+
+        image_spans = []
+        index = 0
+        while index < len(input_ids):
+            if input_ids[index] != self.image_token_id:
+                index += 1
+                continue
+            start = index
+            while index < len(input_ids) and input_ids[index] == self.image_token_id:
+                index += 1
+            span_length = index - start
+            if span_length % self.image_token_len:
+                raise ValueError(
+                    f"visual prompt has an incomplete image block ({span_length} tokens); "
+                    "image blocks must be preserved before truncation"
+                )
+            image_spans.append((start, index))
+
+        expected_tokens = self.video_frames * self.image_token_len
+        found_tokens = sum(end - start for start, end in image_spans)
+        if found_tokens != expected_tokens:
+            raise ValueError(
+                f"visual prompt has {found_tokens} image tokens; expected {expected_tokens} "
+                "for one image aligned to the configured frame slots"
+            )
+
+        _, assistant_ranges = self.generate_text_labels(input_ids)
+        image_start, image_end = image_spans[0][0], image_spans[-1][1]
+        user_start = 0
+        search_stop = image_start - len(self.user_start_ids) + 1
+        for candidate in range(max(0, search_stop)):
+            if input_ids[candidate:candidate + len(self.user_start_ids)] == self.user_start_ids:
+                user_start = candidate
+
+        prefix = input_ids[user_start:image_start]
+        visual = input_ids[image_start:image_end]
+        if not assistant_ranges:
+            remaining = self.max_length - len(prefix) - len(visual)
+            if remaining < 0:
+                raise ValueError("max_length is too short to hold the image blocks")
+            return prefix + visual + input_ids[image_end:image_end + remaining]
+
+        assistant_start, assistant_end = assistant_ranges[-1]
+        assistant_header_start = max(0, assistant_start - len(self.bos_id))
+        assistant_end = min(len(input_ids), assistant_end + len(self.eos_id))
+        user_context = input_ids[image_end:assistant_header_start]
+        answer = input_ids[assistant_header_start:assistant_end]
+        available = self.max_length - len(prefix) - len(visual)
+        if available < len(self.bos_id) + len(self.eos_id) + 1:
+            raise ValueError("max_length is too short to hold the image blocks and an assistant target")
+
+        if len(answer) > available:
+            answer_budget = max(len(self.bos_id) + len(self.eos_id) + 1, available * 2 // 3)
+            answer_budget = min(answer_budget, len(answer))
+            answer = answer[:answer_budget - len(self.eos_id)] + self.eos_id
+        context_budget = min(len(user_context), available - len(answer))
+        if context_budget < len(user_context):
+            if context_budget >= len(self.eos_id):
+                user_context = user_context[:context_budget - len(self.eos_id)] + user_context[-len(self.eos_id):]
+            else:
+                user_context = user_context[:context_budget]
+
+        fitted = prefix + visual + user_context + answer
+        if len(fitted) > self.max_length:
+            raise RuntimeError("visual prompt fitting exceeded max_length")
+        return fitted
 
     
     def generate_text_labels(self, input_ids):
@@ -246,7 +322,8 @@ class OmniDataset(Dataset):
                 pixel_values['pixel_values'], num_frames=self.video_frames
             )
             pixel_values = {
-                'pixel_values': frame_batch.squeeze(0),
+                # DataLoader pin_memory cannot pin a zero-stride expand() view.
+                'pixel_values': frame_batch.squeeze(0).contiguous(),
                 'static_image_mask': torch.tensor(True),
             }
         
@@ -286,9 +363,16 @@ class OmniDataset(Dataset):
                 last_audio_codes = audio_codes_8layers
         
         # 生成prompt (text input_ids)
-        prompt = self.create_chat_prompt(conversations, audio_features_length)
+        has_visual_input = pixel_values is not None and has_image_marker and bool(image_bytes) and self.vision_processor
+        prompt = self.create_chat_prompt(
+            conversations, audio_features_length, image_first=bool(has_visual_input)
+        )
         if pixel_values is not None: prompt = prompt.replace('<image>', self.image_frame_prompt)
-        input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
+        input_ids = self.tokenizer(prompt).input_ids
+        if has_visual_input:
+            input_ids = self.fit_visual_sequence(input_ids)
+        else:
+            input_ids = input_ids[:self.max_length]
         
         # PAD input_ids到max_length
         input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))

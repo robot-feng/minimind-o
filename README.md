@@ -272,9 +272,9 @@ python eval_visual_metrics.py ./out/eval_intermediate/sft_i2t_mini.jsonl
 
 单独的 TIPSv2 编码器在同一组图片的图像专属候选描述检索中 top-1 为 9/9；这不是开放式描述准确率，也不能替代 MiniMind-O 生成评估。对 `sft_i2t_mini_768.pth` 做同提示词的图像消融后，图像输入与无图像输入的最后位置 logits 有明显差异，但橘猫图与水果图的 logits 余弦相似度为 0.999983，贪心下一 token 相同；新四帧静态单图路径相对旧单图路径的最大 logits 差为 0。说明输入通路已接通，静态帧适配没有改变单图数值结果，但视觉信息尚未形成有效的图文语义对齐。
 
-`dataset/sft_i2t_mini.parquet` 只有 10,000 行，约占 2,904,511 行 full I2T 的 0.34%；其中 9,250 行带用户图像标记，约占 full 数据的 0.32%。当前证据更支持视觉语言对齐训练不足，而不是 TIPS 编码器无法识别图片。Dense 完成事件没有收到成功标记，自动流程因此没有产出最终 `sft_omni` 评估；以上均为中间检查点结果，不能作为 full 训练验收结论。
+`dataset/sft_i2t_mini.parquet` 只有 10,000 行，约占 2,904,511 行 full I2T 的 0.34%；其中 9,250 行带用户图像标记，约占 full 数据的 0.32%。此前 full I2T 训练在两个视觉输入边界问题上退出：DataLoader 无法 pin memory 的零步长静态帧张量；以及长提示截断后只剩 29 个图像 token，而每块必须完整保留 64 个。现已修复：训练/推理统一将视觉帧标记放在文本前，超长样本裁剪时保留完整图像块和最后一条 assistant 监督目标，静态帧在进入 DataLoader 前物化为连续张量。上表仍是修复前的中间检查点结果；必须恢复 full I2T 训练并重新评估，才能判断是否达到 README 样例效果。
 
-也可直接调用 `MiniMindOmni.generate_text(..., pixel_values=...)`。视觉输入沿用 `forward` 格式：`{"pixel_values": image_tensor}`、`[B, C, H, W]` 单图张量，或 `[B, F, C, H, W]` 视频帧张量；输入 token 序列需为每张图/每帧保留对应数量的 `<|image_pad|>` 标记。评测与 Web Demo 会把单图扩展到 4 个静态帧槽位；训练数据管线也执行相同扩展，并携带静态标记以复用一次编码结果。该路径只运行 Thinker，可用于单独检查视觉理解。
+也可直接调用 `MiniMindOmni.generate_text(..., pixel_values=...)`。视觉输入沿用 `forward` 格式：`{"pixel_values": image_tensor}`、`[B, C, H, W]` 单图张量，或 `[B, F, C, H, W]` 视频帧张量；输入 token 序列需为每张图/每帧保留对应数量的 `<|image_pad|>` 标记，视觉标记放在文本提示前。评测与 Web Demo 会把单图扩展到 4 个静态帧槽位；训练数据管线也执行相同扩展，并携带静态标记以复用一次编码结果。该路径只运行 Thinker，可用于单独检查视觉理解。
 
 这种稀疏视频输入遵循常见 VLM 流程：解码视频、按时间采样帧、保留时间戳，并将有序帧交给视觉编码器；短视频会复制最后一帧补齐固定帧数。可参照 [Transformers Video Processor](https://huggingface.co/docs/transformers/main_classes/video_processor) 和 [Qwen2.5-VL](https://github.com/QwenLM-corp/Qwen2.5-VL)。Qwen2.5-VL 还使用动态帧率采样和时间位置编码；MiniMind-O 为保持小模型与现有序列结构简单，复用 TIPSv2 图像编码器处理最多 4 帧，并将时间戳以文本帧标记传入 Thinker。单张静态图扩展为 4 个静态帧槽位，并在序列中对应 4 个图像特征块；真正的视频帧保留逐帧特征。当前没有专门的时空编码器或视频时序监督数据，因此视频输入链路可运行，但模型不代表已学会充分的时序理解。更多细节见 [Qwen2.5-VL 技术报告](https://arxiv.org/abs/2502.13923)。
 

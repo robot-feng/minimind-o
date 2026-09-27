@@ -9,6 +9,7 @@ import pyarrow.parquet as pq
 import torch
 from PIL import Image
 from transformers import AutoTokenizer
+from unittest.mock import patch
 
 from dataset.omni_dataset import OmniDataset
 from dataset.prepare_i2t_subset import prepare_i2t_subset
@@ -98,7 +99,37 @@ class TestI2TTrainingDataset(unittest.TestCase):
         self.assertIsNone(audio_inputs)
         self.assertEqual(tuple(pixels["pixel_values"].shape), (4, 3, 32, 32))
         self.assertTrue(pixels["static_image_mask"].item())
+        self.assertTrue(pixels["pixel_values"].is_contiguous())
+        self.assertNotEqual(pixels["pixel_values"].stride(0), 0)
         self.assertEqual((input_ids[-1] == dataset.image_token_id).sum().item(), 64 * 4)
+
+    def test_long_visual_prompt_keeps_full_image_blocks_and_answer_supervision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Image.new("RGB", (12, 8), "orange")
+            encoded = io.BytesIO()
+            image.save(encoded, format="PNG")
+            table = pa.table({
+                "conversations": pa.array([json.dumps([
+                    {"role": "user", "content": "Describe every detail. " * 320 + "<image>"},
+                    {"role": "assistant", "content": "An orange cat is sitting beside a book."},
+                ])], type=pa.large_string()),
+                "image_bytes": pa.array([encoded.getvalue()], type=pa.large_binary()),
+            })
+            path = Path(directory) / "long_i2t.parquet"
+            pq.write_table(table, path)
+            tokenizer = AutoTokenizer.from_pretrained(Path(__file__).resolve().parents[1] / "model")
+            dataset = OmniDataset(
+                str(path), tokenizer, vision_processor=FakeVisionProcessor(), max_length=384,
+                scheduled_sampling=0,
+            )
+
+            with patch("dataset.omni_dataset.random.random", return_value=0.99):
+                input_ids, labels, _, _, _, pixels, _ = dataset[0]
+
+        self.assertEqual(tuple(input_ids.shape), (9, 383))
+        self.assertEqual((input_ids[-1] == dataset.image_token_id).sum().item(), 64 * 4)
+        self.assertGreater((labels != -100).sum().item(), 0)
+        self.assertTrue(pixels["pixel_values"].is_contiguous())
 
     def test_image_bytes_without_image_marker_use_zero_video_frames(self):
         with tempfile.TemporaryDirectory() as directory:
