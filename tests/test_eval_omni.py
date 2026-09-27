@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import torch
 
-from eval_omni import eval_sample, save_visual_result
+from eval_omni import eval_sample, needs_audio_encoder, parse_modes, save_visual_result
 from eval_visual_metrics import compare_visual_results, score_visual_results
 
 
@@ -35,12 +35,18 @@ class FakeTextModel:
         return torch.cat((input_ids, generated), dim=1)
 
 
+class FakeAudioModel:
+    def generate(self, input_ids, *args, **kwargs):
+        self.call = (input_ids, kwargs)
+        yield torch.tensor([[77]], device=input_ids.device), [list(range(8))]
+        yield torch.tensor([[77, 78]], device=input_ids.device), [list(range(8))]
+
+
 class TestTextOnlyEvaluation(unittest.TestCase):
-    def test_results_jsonl_requires_text_only_visual_mode(self):
+    def test_results_jsonl_requires_visual_mode(self):
         entrypoint = Path(__file__).resolve().parents[1] / "eval_omni.py"
         for args in (
-            ["--results_jsonl", "out/result.jsonl", "--mode", "4"],
-            ["--text_only", "--results_jsonl", "out/result.jsonl", "--mode", "0"],
+            ["--results_jsonl", "out/result.jsonl", "--mode", "0"],
         ):
             with self.subTest(args=args):
                 result = subprocess.run(
@@ -48,7 +54,18 @@ class TestTextOnlyEvaluation(unittest.TestCase):
                     capture_output=True, text=True, timeout=30,
                 )
                 self.assertEqual(result.returncode, 2)
-                self.assertIn("--results_jsonl requires", result.stderr)
+        self.assertIn("--results_jsonl requires", result.stderr)
+
+    def test_audio_encoder_loads_only_for_audio_input_modes(self):
+        def args(mode, text_only=False):
+            return SimpleNamespace(mode=mode, text_only=text_only)
+
+        self.assertEqual(parse_modes("4,6"), {"4", "6"})
+        self.assertEqual(parse_modes("-1"), set("0123456"))
+        self.assertFalse(needs_audio_encoder(args("0,1,3,4,6")))
+        self.assertTrue(needs_audio_encoder(args("2")))
+        self.assertTrue(needs_audio_encoder(args("5")))
+        self.assertFalse(needs_audio_encoder(args("2", text_only=True)))
 
     def test_visual_result_is_saved_as_utf8_jsonl(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -88,6 +105,49 @@ class TestTextOnlyEvaluation(unittest.TestCase):
         self.assertEqual(call_args["temperature"], 0)
         self.assertEqual(call_args["top_p"], 1.0)
         self.assertIs(call_args["pixel_values"], pixels)
+
+    def test_audio_evaluation_returns_caption_and_can_save_jsonl_result(self):
+        model = FakeAudioModel()
+        tokenizer = FakeTokenizer()
+        args = SimpleNamespace(
+            device="cpu", open_thinking=0, text_only=False,
+            max_new_tokens=12, temperature=0, top_p=1.0,
+            decode_audio=0, output_dir="unused",
+        )
+        pixels = {"pixel_values": torch.ones(1, 3, 8, 8)}
+
+        answer = eval_sample(
+            model, tokenizer, args, 0, "Please describe this image.", None,
+            "unused.mp3", pixel_values=pixels,
+        )
+
+        self.assertEqual(answer, "77 78")
+        input_ids, call_args = model.call
+        self.assertEqual(tuple(input_ids.shape), (1, 3))
+        self.assertTrue(call_args["stream"])
+        self.assertTrue(call_args["return_audio_codes"])
+        self.assertIs(call_args["pixel_values"], pixels)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "audio_results.jsonl"
+            save_visual_result(str(path), "image", "cat.jpg", "Please describe this image.", answer)
+            row = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(row["answer"], "77 78")
+
+    def test_audio_evaluation_returns_empty_caption_when_stream_has_no_text(self):
+        class EmptyAudioModel:
+            def generate(self, *args, **kwargs):
+                return iter(())
+
+        args = SimpleNamespace(
+            device="cpu", open_thinking=0, text_only=False,
+            max_new_tokens=12, temperature=0, top_p=1.0,
+            decode_audio=0, output_dir="unused",
+        )
+        answer = eval_sample(
+            EmptyAudioModel(), FakeTokenizer(), args, 0, "describe", None,
+            "unused.mp3",
+        )
+        self.assertEqual(answer, "")
 
 
 class TestVisualMetrics(unittest.TestCase):

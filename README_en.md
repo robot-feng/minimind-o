@@ -245,6 +245,13 @@ python eval_omni.py --weight sft_full_a2a --mode 4,6 --text_only --prompt_lang 1
 
 This reads images from `dataset/eval_omni` and videos from `out/eval_video`; there are currently no video files in `dataset/eval_omni`. `sft_full_a2a` is the weight prefix currently available in this repository; replace `--weight` when using another checkpoint.
 `--results_jsonl` saves the mode, filename, prompt and answer for each sample. A fixed seed and greedy decoding make runs reproducible and easier to compare across checkpoints.
+To compare with the README image-to-speech examples, omit `--text_only`: the same command then saves Thinker text, Talker audio and per-image JSONL. Image/video-only modes do not load SenseVoice, which is only used for speech input.
+
+```bash
+python eval_omni.py --weight sft_omni --mode 4 --prompt_lang 0 --max_new_tokens 80 --temperature 0 --seed 42 --image_dir ./dataset/eval_omni --output_dir ./out/eval_image_audio_en --results_jsonl ./out/eval_intermediate/sft_omni_image_audio_en.jsonl
+```
+
+Audio is saved under `output_dir`; WAV is retained if MP3 export is unavailable.
 For the 9 images in `dataset/eval_omni`, compute concept coverage against the manually checked labels:
 
 ```bash
@@ -406,6 +413,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 NPROC_PER_NODE=4 bash trainer/train_i2t_eval.sh
 ```bash
 python eval_omni.py --weight sft_full_a2a --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_full_a2a.jsonl
 python eval_omni.py --weight sft_i2t_mini --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_i2t_mini.jsonl
+python eval_omni.py --weight sft_omni --mode 4 --prompt_lang 0 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --output_dir ./out/eval_image_audio_en --results_jsonl ./out/eval_intermediate/sft_omni_image_audio_en.jsonl
 python eval_visual_metrics.py ./out/eval_intermediate/sft_full_a2a.jsonl --compare ./out/eval_intermediate/sft_i2t_mini.jsonl
 ```
 

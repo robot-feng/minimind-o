@@ -244,6 +244,13 @@ python eval_omni.py --weight sft_full_a2a --mode 4,6 --text_only --prompt_lang 1
 
 该命令会读取 `dataset/eval_omni` 中的图片，并读取 `out/eval_video` 中的视频；当前 `dataset/eval_omni` 没有视频文件。`sft_full_a2a` 是本仓库当前已有的权重前缀，使用其他权重时替换 `--weight`。
 `--results_jsonl` 会按样本保存模式、文件名、提示和回答，配合固定种子与贪心解码可复现实验并直接比较不同 checkpoint。
+若要与 README 中的图像语音样例对照，可关闭 `--text_only`：同一命令会保存 Thinker 文本、Talker 音频，并写出逐图 JSONL。纯图像/视频模式不会加载只负责语音输入的 SenseVoice 编码器。
+
+```bash
+python eval_omni.py --weight sft_omni --mode 4 --prompt_lang 0 --max_new_tokens 80 --temperature 0 --seed 42 --image_dir ./dataset/eval_omni --output_dir ./out/eval_image_audio_en --results_jsonl ./out/eval_intermediate/sft_omni_image_audio_en.jsonl
+```
+
+音频写入 `output_dir`；若 MP3 导出依赖不可用，程序会保留 WAV。
 对 `dataset/eval_omni` 的 9 张图片，还可用人工核对的核心概念计算覆盖率：
 
 ```bash
@@ -403,6 +410,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 NPROC_PER_NODE=4 bash trainer/train_i2t_eval.sh
 ```bash
 python eval_omni.py --weight sft_full_a2a --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_full_a2a.jsonl
 python eval_omni.py --weight sft_i2t_mini --text_only --mode 4 --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_i2t_mini.jsonl
+python eval_omni.py --weight sft_omni --mode 4 --prompt_lang 0 --image_dir ./dataset/eval_omni --max_new_tokens 80 --temperature 0 --seed 42 --output_dir ./out/eval_image_audio_en --results_jsonl ./out/eval_intermediate/sft_omni_image_audio_en.jsonl
 python eval_visual_metrics.py ./out/eval_intermediate/sft_full_a2a.jsonl --compare ./out/eval_intermediate/sft_i2t_mini.jsonl
 ```
 

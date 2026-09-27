@@ -23,8 +23,17 @@ def save_visual_result(path, mode, source, prompt, answer):
         f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
 
+def parse_modes(mode):
+    return set(mode.replace(',', '').replace('-1', '0123456'))
+
+
+def needs_audio_encoder(args):
+    return not args.text_only and bool(parse_modes(args.mode).intersection({'2', '5'}))
+
+
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
+    load_audio_encoder = needs_audio_encoder(args)
     if 'model' in args.load_from:
         moe_suffix = '_moe' if args.use_moe else ''
         ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
@@ -34,16 +43,16 @@ def init_model(args):
                 num_hidden_layers=args.num_hidden_layers, 
                 use_moe=bool(args.use_moe)
             ),
-            audio_encoder_path=None if args.text_only else "./model/SenseVoiceSmall",
+            audio_encoder_path="./model/SenseVoiceSmall" if load_audio_encoder else None,
             vision_model_path=args.vision_dir
         )
         model.load_state_dict(torch.load(ckp, map_location=args.device), strict=False)
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
-        if args.text_only:
-            model.audio_encoder, model.audio_processor = None, None
-        else:
+        if load_audio_encoder:
             model.audio_encoder, model.audio_processor = MiniMindOmni.load_sensevoice("./model/SenseVoiceSmall")
+        else:
+            model.audio_encoder, model.audio_processor = None, None
         model.vision_encoder, model.vision_processor = MiniMindOmni.load_vision(args.vision_dir)
     log_model_params(model)
     if model.audio_encoder is not None: model.audio_encoder.to(args.device)
@@ -66,6 +75,7 @@ def eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, output_name, 
         print('📒 [Thinker]: ', answer, flush=True)
         return answer
 
+    answer = ""
     audio_frames = []
     with torch.no_grad():
         res_y = model.generate(x, tokenizer.eos_token_id, max_new_tokens=args.max_new_tokens,
@@ -92,7 +102,7 @@ def eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, output_name, 
                     codes = [f for f in audio_frames if f and len(f) == 8]
                     if not codes:
                         print('⚠️  生成的Mimi codes为空，跳过保存。')
-                        return
+                        return answer
                     mimi_codes = torch.tensor(codes, dtype=torch.long).T.unsqueeze(0).to(args.device)
                     filtered = torch.where(mimi_codes >= 2049, torch.zeros_like(mimi_codes), mimi_codes)
                     audio = model.mimi_model.decode(filtered).audio_values
@@ -108,6 +118,7 @@ def eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, output_name, 
                     print(f'⚠️  保存音频失败: {str(e)}')
             else:
                 print("(decode_audio=off)\n")
+    return answer
 
 
 def main():
@@ -130,17 +141,17 @@ def main():
     parser.add_argument('--vision_dir', default='google/tipsv2-b14', type=str, help="TIPSv2视觉模型 ID 或本地路径")
     parser.add_argument('--open_thinking', default=0, type=int, help="是否开启思考模式（0=否，1=是）（思考模式下禁用audio输出）")
     parser.add_argument('--text_only', action='store_true', help="仅生成文本，不加载或运行音频模块；适用于文本、图像和视频评估")
-    parser.add_argument('--results_jsonl', type=str, help="仅文本图像/视频评测：逐样本保存来源、提示和回答")
+    parser.add_argument('--results_jsonl', type=str, help="图像/视频评测：逐样本保存来源、提示和文本回答")
     parser.add_argument('--seed', type=int, help="固定随机种子以便复现实验")
     parser.add_argument('--decode_audio', default=1, type=int, help="是否解码音频输出（0=否，1=是）")
     parser.add_argument('--mode', default='0', type=str, help="评估模式：-1=all 0=text 1=multi 2=audio 3=clone 4=image 5=mix 6=video（逗号组合，如 2,5）")
     parser.add_argument('--prompt_lang', default=0, type=int, choices=[0, 1, 2], help="问题语言：0=英文 1=中文 2=英文+中文")
     args = parser.parse_args()
-    modes = set(args.mode.replace(',', '').replace('-1', '0123456'))
+    modes = parse_modes(args.mode)
     if args.text_only and modes.intersection({'2', '3', '5'}):
         parser.error("--text_only cannot be combined with audio or mixed-input modes 2, 3, or 5")
-    if args.results_jsonl and (not args.text_only or not modes.intersection({'4', '6'})):
-        parser.error("--results_jsonl requires --text_only and image or video mode 4/6")
+    if args.results_jsonl and not modes.intersection({'4', '6'}):
+        parser.error("--results_jsonl requires image or video mode 4/6")
     
     if not args.text_only:
         os.makedirs(args.output_dir, exist_ok=True)
