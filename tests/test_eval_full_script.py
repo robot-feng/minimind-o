@@ -50,6 +50,7 @@ class FullEvaluationScriptTests(unittest.TestCase):
             self.assertIn(str(results_dir / "sft_omni_image_text_zh_metrics.json"), output)
             self.assertIn(str(results_dir / "sft_omni_vs_sft_i2t_mini_image_text_en.json"), output)
             self.assertIn(str(results_dir / "sft_omni_visual_comparison.png"), output)
+            self.assertIn(str(results_dir / "sft_omni_visual_comparison.md"), output)
             self.assertIn(str(audio_dir), output)
             self.assertFalse((results_dir / "sft_omni_image_audio_en.jsonl").exists())
             self.assertFalse((results_dir / "sft_omni_image_audio_en_metrics.json").exists())
@@ -72,10 +73,12 @@ class FullEvaluationScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             comparison_path = Path(temporary_directory) / "comparison.json"
             image_path = Path(temporary_directory) / "comparison.png"
+            markdown_path = Path(temporary_directory) / "comparison.md"
             comparison_path.write_text(json.dumps(comparison), encoding="utf-8")
             completed = subprocess.run(
                 [sys.executable, str(ROOT / "scripts" / "plot_visual_comparison.py"),
-                 str(comparison_path), "--output", str(image_path)],
+                 str(comparison_path), "--output", str(image_path),
+                 "--markdown-output", str(markdown_path)],
                 cwd=ROOT,
                 capture_output=True,
                 text=True,
@@ -87,6 +90,11 @@ class FullEvaluationScriptTests(unittest.TestCase):
             with Image.open(image_path) as chart:
                 self.assertEqual(chart.format, "PNG")
                 self.assertEqual(chart.size, (1600, 900))
+            markdown = markdown_path.read_text(encoding="utf-8")
+            self.assertIn("Mean concept recall", markdown)
+            self.assertIn("Change (final - baseline)", markdown)
+            self.assertIn("sft_i2t_mini", markdown)
+            self.assertIn("sft_omni", markdown)
 
     def test_comparison_plotter_rejects_missing_image_answers(self):
         comparison = {

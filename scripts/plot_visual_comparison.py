@@ -63,9 +63,34 @@ def _validate_comparison(data):
             raise ValueError("comparison JSON has an image without both answers")
 
 
-def render_comparison(comparison_path, output_path):
-    data = json.loads(Path(comparison_path).read_text(encoding="utf-8"))
-    _validate_comparison(data)
+def _percent(value):
+    return f"{float(value) * 100:.1f}%"
+
+
+def render_markdown_report(data, before_label, after_label):
+    rows = data["per_image"]
+    before_all = round(float(data["before"]["all_concepts_hit_rate"]) * len(rows))
+    after_all = round(float(data["after"]["all_concepts_hit_rate"]) * len(rows))
+    lines = [
+        f"| Checkpoint | Mean concept recall | All concepts hit |",
+        "| --- | ---: | ---: |",
+        f"| `{before_label}` | {_percent(data['before']['mean_concept_recall'])} | {before_all}/{len(rows)} ({_percent(data['before']['all_concepts_hit_rate'])}) |",
+        f"| `{after_label}` | {_percent(data['after']['mean_concept_recall'])} | {after_all}/{len(rows)} ({_percent(data['after']['all_concepts_hit_rate'])}) |",
+        f"| Change (final - baseline) | {(float(data['after']['mean_concept_recall']) - float(data['before']['mean_concept_recall'])) * 100:+.1f} pp | {(float(data['after']['all_concepts_hit_rate']) - float(data['before']['all_concepts_hit_rate'])) * 100:+.1f} pp |",
+        "",
+        "| Image | Baseline recall | Final recall | Change |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        before = float(row["before_concept_recall"])
+        after = float(row["after_concept_recall"])
+        source = Path(row["source"]).name.replace("|", "\\|")
+        lines.append(f"| `{source}` | {_percent(before)} | {_percent(after)} | {(after - before) * 100:+.1f} pp |")
+    lines.extend(("", "Concept recall is keyword coverage on this fixed image set; inspect the paired answers and generated audio before judging quality."))
+    return "\n".join(lines) + "\n"
+
+
+def render_comparison(data, output_path):
     rows = data["per_image"]
 
     image = Image.new("RGB", (WIDTH, HEIGHT), "white")
@@ -145,9 +170,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("comparison_json", help="JSON from eval_visual_metrics.py --compare")
     parser.add_argument("--output", required=True, help="destination PNG path")
+    parser.add_argument("--markdown-output", help="optional Markdown summary-table path")
+    parser.add_argument("--before-label", default="sft_i2t_mini")
+    parser.add_argument("--after-label", default="sft_omni")
     args = parser.parse_args()
-    path = render_comparison(args.comparison_json, args.output)
+    data = json.loads(Path(args.comparison_json).read_text(encoding="utf-8"))
+    _validate_comparison(data)
+    path = render_comparison(data, args.output)
     print(path)
+    if args.markdown_output:
+        markdown_path = Path(args.markdown_output)
+        markdown_path.parent.mkdir(parents=True, exist_ok=True)
+        markdown_path.write_text(
+            render_markdown_report(data, args.before_label, args.after_label),
+            encoding="utf-8",
+        )
+        print(markdown_path)
 
 
 if __name__ == "__main__":
