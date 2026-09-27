@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WEIGHT="${EVAL_WEIGHT:-sft_omni}"
+BASELINE_WEIGHT="${EVAL_BASELINE_WEIGHT:-sft_i2t_mini}"
 PYTHON_BIN="${PYTHON_BIN:-/data/miniconda3/envs/minimind/bin/python}"
 CONDA_BIN_DIR="${CONDA_BIN_DIR:-/data/miniconda3/bin}"
 RESULTS_DIR="${EVAL_RESULTS_DIR:-$ROOT/out/eval_intermediate}"
@@ -37,8 +38,19 @@ eval_visual_metric() {
     fi
 }
 
+eval_visual_comparison() {
+    local before="$1" after="$2" output="$3"
+    if [[ "${DRY_RUN:-0}" == 1 ]]; then
+        eval_python "$ROOT/eval_visual_metrics.py" "$before" --compare "$after"
+        printf '[dry-run] comparison output: %s\n' "$output"
+    else
+        eval_python "$ROOT/eval_visual_metrics.py" "$before" --compare "$after" | tee "$output"
+    fi
+}
+
 echo "$(date '+evaluation_started_at=%F %T %Z')"
 echo "weight=$WEIGHT"
+echo "baseline_weight=$BASELINE_WEIGHT"
 echo "dry_run=${DRY_RUN:-0}"
 
 echo "=== Text, audio-input, and video evaluation ==="
@@ -56,6 +68,17 @@ eval_python "$ROOT/eval_omni.py" \
     --image_dir "$ROOT/dataset/eval_omni" --output_dir "$AUDIO_DIR" \
     --results_jsonl "$RESULTS_DIR/${WEIGHT}_image_audio_en.jsonl"
 
+echo "=== English text-only baseline and final image evaluation ==="
+eval_python "$ROOT/eval_omni.py" \
+    --weight "$BASELINE_WEIGHT" --mode 4 --text_only --prompt_lang 0 \
+    --max_new_tokens 80 --temperature 0 --seed 42 \
+    --image_dir "$ROOT/dataset/eval_omni" \
+    --results_jsonl "$RESULTS_DIR/${BASELINE_WEIGHT}_image_text_en.jsonl"
+eval_python "$ROOT/eval_omni.py" \
+    --weight "$WEIGHT" --mode 4 --text_only --prompt_lang 0 --max_new_tokens 80 \
+    --temperature 0 --seed 42 --image_dir "$ROOT/dataset/eval_omni" \
+    --results_jsonl "$RESULTS_DIR/${WEIGHT}_image_text_en.jsonl"
+
 echo "=== Chinese text-only image evaluation ==="
 eval_python "$ROOT/eval_omni.py" \
     --weight "$WEIGHT" --mode 4 --text_only --prompt_lang 1 --max_new_tokens 80 \
@@ -65,7 +88,12 @@ eval_python "$ROOT/eval_omni.py" \
 echo "=== Visual concept metrics ==="
 eval_visual_metric "$RESULTS_DIR/${WEIGHT}_image_audio_en.jsonl" \
     "$RESULTS_DIR/${WEIGHT}_image_audio_en_metrics.json"
+eval_visual_metric "$RESULTS_DIR/${WEIGHT}_image_text_en.jsonl" \
+    "$RESULTS_DIR/${WEIGHT}_image_text_en_metrics.json"
 eval_visual_metric "$RESULTS_DIR/${WEIGHT}_image_text_zh.jsonl" \
     "$RESULTS_DIR/${WEIGHT}_image_text_zh_metrics.json"
+eval_visual_comparison "$RESULTS_DIR/${BASELINE_WEIGHT}_image_text_en.jsonl" \
+    "$RESULTS_DIR/${WEIGHT}_image_text_en.jsonl" \
+    "$RESULTS_DIR/${WEIGHT}_vs_${BASELINE_WEIGHT}_image_text_en.json"
 
 echo "evaluation_exit=0"
