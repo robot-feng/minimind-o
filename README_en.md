@@ -731,6 +731,8 @@ https://github.com/user-attachments/assets/354a5eec-c147-4d18-8c7a-942bd2a0b4b0
 
 The image-QA samples chain visual encoding, text generation and speech rendering inside the same path. The current model usually captures the main object and the rough scene, but fine-grained spatial relations, counts and attributes are still often wrong, which makes it more suitable as a reproducible baseline for tiny-model Omni pipelines.
 
+This collage is a qualitative illustration without a checkpoint, encoder version or decoding configuration, so it cannot be assumed to show the local TIPSv2-trained checkpoint. The [upstream release configuration](https://github.com/jingyaogong/minimind-o) uses SigLIP2 base P32 at 256×256; this repository replaces it with TIPSv2 B/14 at 448×448 and must be evaluated with its own trained weights. The collage shows eight images, while `dataset/eval_omni` contains a fixed set of nine (including an additional panda image), so they are not a one-to-one metric comparison. The captions also contain clear category hallucinations, such as calling the dinosaur and rabbit foxes and describing the astronaut's bicycle as a motorbike. Judge the reproduction from same-prompt evaluation, per-image answers and manual review.
+
 <table>
 <tr>
 <td>
