@@ -43,12 +43,12 @@ class FullEvaluationScriptTests(unittest.TestCase):
 
             output = completed.stdout + completed.stderr
             self.assertEqual(completed.returncode, 0, output)
-            self.assertIn("--mode 0,2,6", output.replace("\\,", ","))
+            self.assertIn("--mode 0,2", output.replace("\\,", ","))
             self.assertIn("--mode 4 --prompt_lang 0", output)
             self.assertIn("--weight sft_i2t_mini --mode 4 --text_only --prompt_lang 0", output)
             self.assertIn("--weight sft_omni --mode 4 --text_only --prompt_lang 0", output)
             self.assertIn("--load_from jingyaogong/minimind-3o", output)
-            self.assertIn("--vision_dir jingyaogong/siglip2-base-p32-256-ve --video_frames 1", output)
+            self.assertIn("--vision_dir jingyaogong/siglip2-base-p32-256-ve", output)
             self.assertIn("--mode 4 --text_only --prompt_lang 1", output)
             self.assertIn(str(results_dir / "sft_omni_image_audio_en.jsonl"), output)
             self.assertIn(str(results_dir / "sft_omni_image_text_zh.jsonl"), output)

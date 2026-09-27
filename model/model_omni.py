@@ -66,6 +66,8 @@ class MMVisionProjector(nn.Module):
 def pool_patch_tokens(patch_tokens, target_tokens):
     if patch_tokens.ndim != 3:
         raise ValueError("patch_tokens must have shape (batch, patches, hidden)")
+    if target_tokens < 1:
+        raise ValueError("target_tokens must be positive")
     grid = math.isqrt(patch_tokens.size(1))
     target_grid = math.isqrt(target_tokens)
     if grid * grid == patch_tokens.size(1) and target_grid * target_grid == target_tokens:
@@ -251,56 +253,48 @@ class MiniMindOmni(MiniMindForCausalLM):
 
     @torch.compiler.disable
     def get_image_embeddings(self, image_inputs):
-        pixel_values = image_inputs['pixel_values']
+        pixel_values = image_inputs['pixel_values'] if hasattr(image_inputs, 'keys') else image_inputs
+        if pixel_values.ndim != 4:
+            raise ValueError("pixel_values must have shape (batch, channels, height, width)")
         with torch.no_grad():
-            if pixel_values.ndim == 4:
-                patch_tokens = self.vision_encoder.encode_image(pixel_values).patch_tokens
-                return pool_patch_tokens(patch_tokens, self.config.image_token_len)
-            if pixel_values.ndim == 5:
-                batch, frames = pixel_values.shape[:2]
-                static_mask = image_inputs.get('static_image_mask')
-                if static_mask is not None:
-                    static_mask = static_mask.to(device=pixel_values.device, dtype=torch.bool).reshape(batch)
-                if static_mask is not None and static_mask.all():
-                    patch_tokens = self.vision_encoder.encode_image(pixel_values[:, 0]).patch_tokens
-                    pooled = pool_patch_tokens(patch_tokens, self.config.image_token_len)
-                    return pooled.unsqueeze(1).expand(-1, frames, -1, -1)
-                patch_tokens = self.vision_encoder.encode_image(pixel_values.flatten(0, 1)).patch_tokens
-                patch_tokens = pool_patch_tokens(patch_tokens, self.config.image_token_len)
-                return patch_tokens.reshape(batch, frames, self.config.image_token_len, -1)
-        raise ValueError("pixel_values must have shape (B, C, H, W) or (B, frames, C, H, W)")
+            patch_tokens = self.vision_encoder.encode_image(pixel_values).patch_tokens
+            return pool_patch_tokens(patch_tokens, self.config.image_token_len)
 
     @torch.compiler.disable
     def encode_image_inputs(self, pixel_values):
         if pixel_values is None or self.vision_encoder is None: return None
+        mask = None
         if isinstance(pixel_values, dict):
-            image_inputs = pixel_values
-            pixels = image_inputs['pixel_values']
+            pixels = pixel_values['pixel_values']
+            mask = pixel_values.get('image_mask')
         else:
             pixels = pixel_values
-            image_inputs = {'pixel_values': pixels}
-        mask = pixels.flatten(1).any(1)
+        if pixels.ndim != 4:
+            raise ValueError("pixel_values must have shape (batch, channels, height, width)")
+        if mask is None:
+            mask = torch.ones(pixels.size(0), dtype=torch.bool, device=pixels.device)
+        else:
+            mask = torch.as_tensor(mask, device=pixels.device, dtype=torch.bool).reshape(-1)
+            if mask.numel() != pixels.size(0):
+                raise ValueError("image_mask must contain one value per image")
         if not mask.any():
-            frame_shape = (pixels.size(1), self.config.image_token_len, self.config.hidden_size) if pixels.ndim == 5 else (self.config.image_token_len, self.config.hidden_size)
-            return pixels.new_zeros(pixels.size(0), *frame_shape)
-        valid_inputs = {'pixel_values': pixels[mask]}
-        static_mask = image_inputs.get('static_image_mask')
-        if static_mask is not None:
-            valid_inputs['static_image_mask'] = static_mask.to(mask.device).reshape(-1)[mask]
-        emb = self.get_image_embeddings(valid_inputs)
-        emb = self.vision_proj(emb)
+            return pixels.new_zeros(pixels.size(0), self.config.image_token_len, self.config.hidden_size)
+        emb = self.get_image_embeddings(pixels[mask])
+        projector_parameters = tuple(self.vision_proj.parameters())
+        projector_dtype = projector_parameters[0].dtype if projector_parameters else emb.dtype
+        emb = self.vision_proj(emb.to(dtype=projector_dtype))
         if mask.all(): return emb
         idx_shape = (-1,) + (1,) * (emb.ndim - 1)
         idx = mask.nonzero().view(*idx_shape).expand_as(emb)
         return emb.new_zeros(pixels.size(0), *emb.shape[1:]).scatter(0, idx, emb)
 
     @torch.compiler.disable
-    def count_vision_proj(self, tokens, h, vision_tensors=None, seqlen=512, static_image_mask=None):
+    def count_vision_proj(self, tokens, h, vision_tensors=None, seqlen=512):
         if vision_tensors is None or not self.config.image_ids:
             return h
-        marker, vf = self.config.image_ids[0], vision_tensors
-        if vf.dim() == 3:
-            vf = vf.unsqueeze(1)
+        marker = self.config.image_ids[0]
+        if vision_tensors.ndim != 3:
+            raise ValueError("vision_tensors must have shape (batch, image_tokens, hidden_size)")
         out = []
         for b in range(h.size(0)):
             hb, seq, spans, i = h[b], tokens[b].tolist(), [], 0
@@ -315,29 +309,16 @@ class MiniMindOmni(MiniMindForCausalLM):
             if not spans:
                 out.append(hb)
                 continue
-            features = vf[b]
-            block_size = self.config.image_token_len
-            frame_spans = []
-            for start, end in spans:
-                span_size = end - start
-                if span_size % block_size:
-                    raise ValueError(f'image marker span has {span_size} tokens; expected multiples of {block_size}')
-                frame_spans.extend(
-                    (start + offset, start + offset + block_size)
-                    for offset in range(0, span_size, block_size)
-                )
-            if static_image_mask is not None and bool(static_image_mask[b]) and features.size(0) == 1:
-                # Rank-4 legacy callers may provide one encoded still for several frame slots.
-                features = features.expand(len(frame_spans), -1, -1)
-            elif static_image_mask is not None and bool(static_image_mask[b]) and len(frame_spans) == 1:
-                # Keep older one-block prompts loadable while new prompts align every frame.
-                features = features[:1]
-            if len(frame_spans) != features.size(0):
+            if len(spans) != 1:
                 raise ValueError(
-                    f'found {len(frame_spans)} image frame markers for {features.size(0)} visual frames'
+                    f'expected one image-token block per sample, found {len(spans)}'
                 )
-            for frame, (start, end) in enumerate(frame_spans):
-                hb = torch.cat((hb[:start], features[frame], hb[end:]), dim=0)[:seqlen]
+            start, end = spans[0]
+            if end - start != self.config.image_token_len:
+                raise ValueError(
+                    f'image token block has {end - start} tokens; expected {self.config.image_token_len}'
+                )
+            hb = torch.cat((hb[:start], vision_tensors[b], hb[end:]), dim=0)[:seqlen]
             out.append(hb)
         return torch.stack(out)
 
@@ -369,23 +350,10 @@ class MiniMindOmni(MiniMindForCausalLM):
             audio_features = self.encode_audio_inputs(audio_inputs, audio_lens)
             hidden_states = self.inject_audio_features(text_ids, hidden_states, audio_features, seq_length)
         if pixel_values is not None and start_pos == 0:
-            if hasattr(pixel_values, 'keys'):
-                static_image_mask = pixel_values.get('static_image_mask')
-                vision_tensors = self.encode_image_inputs(pixel_values).to(hidden_states.dtype)
-            else:
-                static_image_mask = None
-                if len(pixel_values.shape) == 6:
-                    pixel_values = pixel_values.squeeze(2)
-                if len(pixel_values.shape) == 4:
-                    pixel_values = pixel_values.unsqueeze(1)
-                num = pixel_values.size(1)
-                vision_tensors = torch.stack([
-                    self.encode_image_inputs(pixel_values[:, i, :, :, :])
-                    for i in range(num)
-                ], dim=1)
+            vision_tensors = self.encode_image_inputs(pixel_values).to(hidden_states.dtype)
             hidden_states = self.count_vision_proj(
                 tokens=text_ids, h=hidden_states, vision_tensors=vision_tensors,
-                seqlen=seq_length, static_image_mask=static_image_mask,
+                seqlen=seq_length,
             )
         bridge_states = hidden_states
         for i, (layer, past_key_value) in enumerate(zip(self.thinker.layers, past_key_values[:n_thinker])):
@@ -435,7 +403,7 @@ class MiniMindOmni(MiniMindForCausalLM):
     @torch.inference_mode()
     def generate_text(self, input_ids, attention_mask=None, max_new_tokens=256, temperature=0.8,
                       top_p=0.95, eos_token_id=2, pad_token_id=0, pixel_values=None):
-        """Generate text without the audio Talker, optionally conditioned on images or video frames."""
+        """Generate text without the audio Talker, optionally conditioned on one image per sample."""
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape (batch, sequence)")
         if temperature < 0 or not 0 < top_p <= 1:

@@ -72,7 +72,7 @@ MiniMind-O 尝试补上已知的空位：让语音和文本在 hidden state 层�
 - 提供 mini 与 full 两套训练数据：mini 便于快速入门，单卡 3090 上约 2 小时可跑通；full 与发布权重对应，覆盖中文语音与图像任务。
 - 提供多种内置音色、unseen 音色与任意参考音频的音色克隆能力，便于复现音色控制实验。
 - 提供完整的推理与 Demo 工具，支持 CLI 推理、Web UI、流式播放、barge-in 打断和电话模式。
-- 图像使用 TIPSv2 B/14；视频固定为最多 4 帧并复用相同图像编码路径。单张静态图像在训练、评测和推理中对齐为 4 个静态帧槽位：编码器只计算一次，特征复用到 4 个各含 64 token 的图像块；真正的视频仍保留逐帧特征。
+- 当前视觉输入仅支持单张图片：TIPSv2 B/14 编码一张图，经过 projector 后注入一个 64-token 图像块。视频时序建模暂未实现，也没有视频监督训练数据。
 - 关键模块均从 0 用 PyTorch 原生实现，不依赖三方高层封装；同时兼容 `transformers` Tokenizer 与原生权重格式。
 - 配套技术报告覆盖架构、训练曲线、CER / WER 评估、音色克隆相似度与跨模型对比，链接见顶部 Tech Report 区。
 
@@ -206,7 +206,7 @@ print(torch.cuda.is_available())
 
 ### 1' 下载数据
 
-快速开始时，推荐从[数据集链接](https://huggingface.co/datasets/jingyaogong/minimind-o_dataset)只下载 `_mini` 数据集，并放到 `./dataset` 下。mini 数据没有图像或视频样本，所以这条小模型训练管线复现语音能力；视频输入链路可在训练后用自己的视频做推理验证。
+快速开始时，推荐从[数据集链接](https://huggingface.co/datasets/jingyaogong/minimind-o_dataset)只下载 `_mini` 数据集，并放到 `./dataset` 下。默认 mini 数据主要用于快速复现语音能力；单图能力验证使用 `sft_i2t_mini.parquet`。当前仓库不支持视频输入。
 
 ### 2' 开始训练
 
@@ -230,28 +230,22 @@ python eval_omni.py --weight sft_omni
 
 语音默认导出 MP3。使用 Conda 时可通过 `conda install ffmpeg -c conda-forge` 安装 FFmpeg；如果未安装，评估仍会保留解码后的 WAV 并打印保存路径。
 
-视频推理会均匀抽取最多 4 帧，并为每帧加入时间标记：
+若只评估单张图片到文本、不需要生成语音，可跳过音频模块运行视觉测试：
 
 ```bash
-python eval_omni.py --weight sft_zero --mode 6 --video_dir ./dataset/videos --video_frames 4
+python eval_omni.py --weight sft_full_a2a --mode 4 --text_only --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 128 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_full_a2a.jsonl
 ```
 
-若只评估图像/视频到文本、不需要生成语音，可跳过音频模块运行视觉测试：
-
-```bash
-python eval_omni.py --weight sft_full_a2a --mode 4,6 --text_only --prompt_lang 1 --image_dir ./dataset/eval_omni --video_dir ./out/eval_video --max_new_tokens 128 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_full_a2a.jsonl
-```
-
-该命令会读取 `dataset/eval_omni` 中的图片，并读取 `out/eval_video` 中的视频；当前 `dataset/eval_omni` 没有视频文件。`sft_full_a2a` 是本仓库当前已有的权重前缀，使用其他权重时替换 `--weight`。
+该命令会读取 `dataset/eval_omni` 中的图片。`sft_full_a2a` 是本仓库当前已有的权重前缀，使用其他权重时替换 `--weight`。当前评测器拒绝视频模式，避免把无时序监督的帧拼接误报成视频理解。
 `--results_jsonl` 会按样本保存模式、文件名、提示和回答，配合固定种子与贪心解码可复现实验并直接比较不同 checkpoint。
-若要与 README 中的图像语音样例对照，可关闭 `--text_only`：同一命令会保存 Thinker 文本、Talker 音频，并写出逐图 JSONL。纯图像/视频模式不会加载只负责语音输入的 SenseVoice 编码器。
+若要与 README 中的图像语音样例对照，可关闭 `--text_only`：同一命令会保存 Thinker 文本、Talker 音频，并写出逐图 JSONL。纯图像模式不会加载只负责语音输入的 SenseVoice 编码器。
 
 ```bash
 python eval_omni.py --weight sft_omni --mode 4 --prompt_lang 0 --max_new_tokens 80 --temperature 0 --seed 42 --image_dir ./dataset/eval_omni --output_dir ./out/eval_image_audio_en --results_jsonl ./out/eval_intermediate/sft_omni_image_audio_en.jsonl
 ```
 
 音频写入 `output_dir`；若 MP3 导出依赖不可用，程序会保留 WAV。
-全量训练完成后，可运行 `bash scripts/eval_full_omni.sh` 生成统一回归结果：包含文本、音频输入、视频检查，以及 9 张固定图片的英文图像转语音样例、中英文纯视觉评估、与 `sft_i2t_mini` 的同提示逐图对比，以及上游发布模型 `jingyaogong/minimind-3o`（SigLIP2）对照。上游参考使用原生单图、单帧输入和原项目的文本后接图像标记布局；本地 TIPSv2 模型按四帧静态图输入、视觉标记前置。两者使用相同图片和语义提示，分别保留各自训练时的输入布局。逐图 JSONL、概念指标 JSON、PNG 对比图、Markdown 汇总表与音频文件分别写入 `out/eval_intermediate/` 和 `out/eval_full_audio/`。对照图表为 `sft_omni_vs_minimind-3o-release-siglip2_visual_comparison.png` 和 `.md`；固定集概念覆盖率还需结合逐图回答人工判断。
+全量训练完成后，可运行 `bash scripts/eval_full_omni.sh` 生成统一回归结果：包含文本、音频输入，以及 9 张固定图片的英文图像转语音样例、中英文纯视觉评估、与 `sft_i2t_mini` 的同提示逐图对比，以及上游发布模型 `jingyaogong/minimind-3o`（SigLIP2）对照。上游参考与本地 TIPSv2 模型都使用单图输入；本地训练/推理将唯一的 64-token 图像块放在文本提示前，上游保留原项目的文本后接图像标记布局。逐图 JSONL、概念指标 JSON、PNG 对比图、Markdown 汇总表与音频文件分别写入 `out/eval_intermediate/` 和 `out/eval_full_audio/`。对照图表为 `sft_omni_vs_minimind-3o-release-siglip2_visual_comparison.png` 和 `.md`；固定集概念覆盖率还需结合逐图回答人工判断。
 
 若使用本地镜像或缓存路径，可通过 `EVAL_REFERENCE_MODEL` 和 `EVAL_REFERENCE_VISION` 覆盖上游模型与 SigLIP2 编码器位置。参考模型以同一套 `eval_omni` 样本和贪心解码生成逐图回答。
 对 `dataset/eval_omni` 的 9 张图片，还可用人工核对的核心概念计算覆盖率：
@@ -263,7 +257,7 @@ python eval_visual_metrics.py ./out/eval_intermediate/sft_i2t_mini.jsonl
 
 脚本报告平均概念召回率和所有标注概念均命中的图片比例；标注在 `dataset/eval_omni/visual_references.json`。这是小型固定集上的关键词覆盖指标，不衡量幻觉、关系理解或描述流畅度，应同时查看 JSONL 原始回答，不宜外推为通用视觉能力指标。
 
-### 中间结果：9 张固定图片（2026-09-27）
+### 前一版四帧试验结果：9 张固定图片（2026-09-27；不是当前单图实现的验收结果）
 
 | 检查点 | 提示语言 | 图片数 | 平均概念召回率 | 全概念命中 |
 | --- | --- | ---: | ---: | ---: |
@@ -273,13 +267,11 @@ python eval_visual_metrics.py ./out/eval_intermediate/sft_i2t_mini.jsonl
 
 ![中间视觉评估结果](images/visual_eval_interim_20260927.png)
 
-单独的 TIPSv2 编码器在同一组图片的图像专属候选描述检索中 top-1 为 9/9；这不是开放式描述准确率，也不能替代 MiniMind-O 生成评估。对 `sft_i2t_mini_768.pth` 做同提示词的图像消融后，图像输入与无图像输入的最后位置 logits 有明显差异，但橘猫图与水果图的 logits 余弦相似度为 0.999983，贪心下一 token 相同；新四帧静态单图路径相对旧单图路径的最大 logits 差为 0。说明输入通路已接通，静态帧适配没有改变单图数值结果，但视觉信息尚未形成有效的图文语义对齐。
+单独的 TIPSv2 编码器在同一组图片的图像专属候选描述检索中 top-1 为 9/9；这不是开放式描述准确率，也不能替代 MiniMind-O 生成评估。此前四帧实现的 `sft_i2t_mini_768.pth` 在固定集上中英文概念召回都接近 0，视觉效果不合格。当前代码已切回单图输入；这些数值属于前一版试验 checkpoint，不能作为当前实现的成绩。单图实现必须重新训练并重新跑固定集评估。
 
-`dataset/sft_i2t_mini.parquet` 只有 10,000 行，约占 2,904,511 行 full I2T 的 0.34%；其中 9,250 行带用户图像标记，约占 full 数据的 0.32%。此前 full I2T 训练在两个视觉输入边界问题上退出：DataLoader 无法 pin memory 的零步长静态帧张量；以及长提示截断后只剩 29 个图像 token，而每块必须完整保留 64 个。现已修复：训练/推理统一将视觉帧标记放在文本前，超长样本裁剪时保留完整图像块和最后一条 assistant 监督目标，静态帧在进入 DataLoader 前物化为连续张量。上表仍是修复前的中间检查点结果；必须恢复 full I2T 训练并重新评估，才能判断是否达到 README 样例效果。
+`dataset/sft_i2t_mini.parquet` 只有 10,000 行，约占 2,904,511 行 full I2T 的 0.34%；其中 9,250 行带用户图像标记，约占 full 数据的 0.32%。长样本裁剪会保留完整的 64-token 图像块和最后一条 assistant 监督目标。接下来应先用小模型和 mini I2T 数据跑通单图路径，再依据同一固定图片集重新评估；达到效果验收前，不把图像能力描述为复现成功。
 
-也可直接调用 `MiniMindOmni.generate_text(..., pixel_values=...)`。视觉输入沿用 `forward` 格式：`{"pixel_values": image_tensor}`、`[B, C, H, W]` 单图张量，或 `[B, F, C, H, W]` 视频帧张量；输入 token 序列需为每张图/每帧保留对应数量的 `<|image_pad|>` 标记，视觉标记放在文本提示前。评测与 Web Demo 会把单图扩展到 4 个静态帧槽位；训练数据管线也执行相同扩展，并携带静态标记以复用一次编码结果。该路径只运行 Thinker，可用于单独检查视觉理解。
-
-这种稀疏视频输入遵循常见 VLM 流程：解码视频、按时间采样帧、保留时间戳，并将有序帧交给视觉编码器；短视频会复制最后一帧补齐固定帧数。可参照 [Transformers Video Processor](https://huggingface.co/docs/transformers/main_classes/video_processor) 和 [Qwen2.5-VL](https://github.com/QwenLM-corp/Qwen2.5-VL)。Qwen2.5-VL 还使用动态帧率采样和时间位置编码；MiniMind-O 为保持小模型与现有序列结构简单，复用 TIPSv2 图像编码器处理最多 4 帧，并将时间戳以文本帧标记传入 Thinker。单张静态图扩展为 4 个静态帧槽位，并在序列中对应 4 个图像特征块；真正的视频帧保留逐帧特征。当前没有专门的时空编码器或视频时序监督数据，因此视频输入链路可运行，但模型不代表已学会充分的时序理解。更多细节见 [Qwen2.5-VL 技术报告](https://arxiv.org/abs/2502.13923)。
+也可直接调用 `MiniMindOmni.generate_text(..., pixel_values=...)`。视觉输入是 `{"pixel_values": image_tensor}` 或 `[B, C, H, W]`；每个样本恰好对应一个连续的 64-token `<|image_pad|>` 块，放在文本提示前。当前实现有意只覆盖单图，视频理解尚未实现：简单地按序输入多帧或添加文本时间戳，不等于具备时序位置编码和视频监督。后续需要独立设计并验证时空表示和视频数据，当前不宣称支持视频。
 
 # 📌 模型细节
 
@@ -421,7 +413,7 @@ python eval_visual_metrics.py ./out/eval_intermediate/sft_full_a2a.jsonl --compa
 
 ### MiniMind 训练能力在 MiniMind-O 中的对应入口
 
-MiniMind 上游 `trainer/` 中与语言模型训练相关的能力，已适配到根仓库 `trainer/`，并使用 MiniMind-O 的模型、tokenizer 与 checkpoint 格式。文本预训练、文本 SFT、LoRA、蒸馏和偏好/RL 入口目前只训练 Thinker 文本路径；音频和图像监督通过上面的 `train_sft_omni.py` 完成，单图训练样本扩展到统一的静态帧张量布局。仓库支持真实视频的均匀抽帧和推理输入，但尚未提供视频时序监督数据集，因此模型仍需专门的视频训练数据才能学会时序理解。
+MiniMind 上游 `trainer/` 中与语言模型训练相关的能力，已适配到根仓库 `trainer/`，并使用 MiniMind-O 的模型、tokenizer 与 checkpoint 格式。文本预训练、文本 SFT、LoRA、蒸馏和偏好/RL 入口目前只训练 Thinker 文本路径；音频和单图监督通过上面的 `train_sft_omni.py` 完成。视频输入和视频时序训练暂未实现。
 
 | 能力 | MiniMind-O 入口 | 数据文件 / 说明 |
 |---|---|---|

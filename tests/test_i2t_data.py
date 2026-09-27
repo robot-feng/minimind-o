@@ -71,6 +71,22 @@ class FakeVisionProcessor:
 
 
 class TestI2TTrainingDataset(unittest.TestCase):
+    def make_dataset(self, directory, content, image_bytes, vision_processor):
+        table = pa.table({
+            "conversations": pa.array([json.dumps([
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": "A reply."},
+            ])], type=pa.large_string()),
+            "image_bytes": pa.array([image_bytes], type=pa.large_binary()),
+        })
+        path = Path(directory) / "images.parquet"
+        pq.write_table(table, path)
+        tokenizer = AutoTokenizer.from_pretrained(Path(__file__).resolve().parents[1] / "model")
+        return OmniDataset(
+            str(path), tokenizer, vision_processor=vision_processor,
+            max_length=128, scheduled_sampling=0,
+        )
+
     def test_image_example_loads_without_audio_and_preserves_visual_tokens(self):
         with tempfile.TemporaryDirectory() as directory:
             image = Image.new("RGB", (12, 8), "orange")
@@ -97,11 +113,10 @@ class TestI2TTrainingDataset(unittest.TestCase):
         self.assertEqual(tuple(input_ids.shape), (9, 383))
         self.assertGreater((labels != -100).sum().item(), 0)
         self.assertIsNone(audio_inputs)
-        self.assertEqual(tuple(pixels["pixel_values"].shape), (4, 3, 32, 32))
-        self.assertTrue(pixels["static_image_mask"].item())
+        self.assertEqual(tuple(pixels["pixel_values"].shape), (3, 32, 32))
+        self.assertTrue(pixels["image_mask"].item())
         self.assertTrue(pixels["pixel_values"].is_contiguous())
-        self.assertNotEqual(pixels["pixel_values"].stride(0), 0)
-        self.assertEqual((input_ids[-1] == dataset.image_token_id).sum().item(), 64 * 4)
+        self.assertEqual((input_ids[-1] == dataset.image_token_id).sum().item(), 64)
 
     def test_long_visual_prompt_keeps_full_image_blocks_and_answer_supervision(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -127,11 +142,11 @@ class TestI2TTrainingDataset(unittest.TestCase):
                 input_ids, labels, _, _, _, pixels, _ = dataset[0]
 
         self.assertEqual(tuple(input_ids.shape), (9, 383))
-        self.assertEqual((input_ids[-1] == dataset.image_token_id).sum().item(), 64 * 4)
+        self.assertEqual((input_ids[-1] == dataset.image_token_id).sum().item(), 64)
         self.assertGreater((labels != -100).sum().item(), 0)
         self.assertTrue(pixels["pixel_values"].is_contiguous())
 
-    def test_image_bytes_without_image_marker_use_zero_video_frames(self):
+    def test_image_bytes_without_image_marker_do_not_create_visual_tokens(self):
         with tempfile.TemporaryDirectory() as directory:
             table = pa.table({
                 "conversations": pa.array([json.dumps([
@@ -150,32 +165,27 @@ class TestI2TTrainingDataset(unittest.TestCase):
             )
             _, _, _, _, _, pixels, _ = dataset[0]
 
-        self.assertEqual(tuple(pixels["pixel_values"].shape), (4, 3, 32, 32))
-        self.assertFalse(pixels["static_image_mask"].item())
+        self.assertEqual(tuple(pixels["pixel_values"].shape), (3, 32, 32))
+        self.assertFalse(pixels["image_mask"].item())
         self.assertEqual(pixels["pixel_values"].count_nonzero().item(), 0)
 
-    def test_training_collate_pads_visual_frames_and_preserves_static_flag(self):
-        def sample(frames, static):
-            return (
-                torch.zeros(9, 3, dtype=torch.long),
-                torch.zeros(3, dtype=torch.long),
-                torch.zeros(8, 3, dtype=torch.long),
-                None,
-                0,
-                {
-                    "pixel_values": torch.full((frames, 3, 2, 2), float(frames)),
-                    "static_image_mask": torch.tensor(static),
-                },
-                torch.zeros(192),
-            )
+    def test_image_marker_requires_image_bytes_and_encoder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing_bytes = self.make_dataset(directory, "<image> describe", None, FakeVisionProcessor())
+            with self.assertRaisesRegex(ValueError, "requires image_bytes"):
+                missing_bytes[0]
 
-        batch = omni_collate_fn([sample(1, True), sample(4, False)])
-        pixel_values = batch[5]
-        self.assertEqual(tuple(pixel_values["pixel_values"].shape), (2, 4, 3, 2, 2))
-        self.assertEqual(pixel_values["static_image_mask"].tolist(), [True, False])
-        torch.testing.assert_close(pixel_values["pixel_values"][0, 3], pixel_values["pixel_values"][0, 0])
+            missing_encoder = self.make_dataset(directory, "<image> describe", b"image", None)
+            with self.assertRaisesRegex(ValueError, "requires image_bytes"):
+                missing_encoder[0]
 
-    def test_static_image_collate_materializes_frame_storage_for_pinned_memory(self):
+    def test_training_rejects_multiple_images_in_one_sample(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = self.make_dataset(directory, "<image> then <image>", b"image", FakeVisionProcessor())
+            with self.assertRaisesRegex(ValueError, "exactly one image"):
+                dataset[0]
+
+    def test_training_collate_batches_one_image_per_sample(self):
         def sample(value):
             return (
                 torch.zeros(9, 3, dtype=torch.long),
@@ -183,18 +193,35 @@ class TestI2TTrainingDataset(unittest.TestCase):
                 torch.zeros(8, 3, dtype=torch.long),
                 None,
                 0,
-                {
-                    "pixel_values": torch.full((4, 3, 2, 2), float(value)),
-                    "static_image_mask": torch.tensor(True),
-                },
+                {"pixel_values": torch.full((3, 2, 2), float(value))},
                 torch.zeros(192),
             )
 
         batch = omni_collate_fn([sample(1), sample(2)])
-        pixels = batch[5]["pixel_values"]
-        self.assertTrue(pixels.is_contiguous())
-        self.assertNotEqual(pixels.stride(1), 0)
-        torch.testing.assert_close(pixels[:, 0], pixels[:, 3])
+        pixel_values = batch[5]
+        self.assertEqual(tuple(pixel_values['pixel_values'].shape), (2, 3, 2, 2))
+        self.assertEqual(pixel_values['image_mask'].tolist(), [True, True])
+        torch.testing.assert_close(pixel_values['pixel_values'][:, 0, 0, 0], torch.tensor([1.0, 2.0]))
+
+    def test_collate_fills_missing_images_with_zeros_without_reordering(self):
+        def sample(image):
+            return (
+                torch.zeros(9, 3, dtype=torch.long),
+                torch.zeros(3, dtype=torch.long),
+                torch.zeros(8, 3, dtype=torch.long),
+                None,
+                0,
+                image,
+                torch.zeros(192),
+            )
+
+        batch = omni_collate_fn([sample({"pixel_values": torch.ones(3, 2, 2)}), sample(None)])
+        pixels = batch[5]
+        self.assertEqual(pixels['image_mask'].tolist(), [True, False])
+        pixels = pixels['pixel_values']
+        self.assertEqual(tuple(pixels.shape), (2, 3, 2, 2))
+        self.assertTrue(pixels[0].all())
+        self.assertEqual(pixels[1].count_nonzero().item(), 0)
 
 
 if __name__ == "__main__":

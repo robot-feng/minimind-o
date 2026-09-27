@@ -123,24 +123,24 @@ class TestTextOnlyEvaluation(unittest.TestCase):
 
         self.assertEqual(prompt, f"{'<image>' * 64}\n\ndescribe this image")
 
-    def test_reference_image_input_strips_metadata_and_squeezes_one_frame(self):
-        frames = torch.ones(1, 1, 3, 8, 8)
+    def test_reference_image_input_keeps_one_image_and_strips_metadata(self):
+        pixels = torch.ones(1, 3, 8, 8)
         result = prepare_reference_image_inputs({
-            "pixel_values": frames,
-            "static_image_mask": torch.tensor([True]),
+            "pixel_values": pixels,
+            "unused_metadata": torch.tensor([True]),
         })
 
         self.assertEqual(set(result), {"pixel_values"})
-        self.assertTrue(torch.equal(result["pixel_values"], frames[:, 0]))
+        self.assertTrue(torch.equal(result["pixel_values"], pixels))
 
-    def test_reference_image_input_rejects_video_frames(self):
-        with self.assertRaisesRegex(ValueError, "one image frame"):
+    def test_reference_image_input_rejects_frame_batches(self):
+        with self.assertRaisesRegex(ValueError, "batch, channels, height, width"):
             prepare_reference_image_inputs({"pixel_values": torch.ones(1, 2, 3, 8, 8)})
 
     def test_reference_greedy_generation_passes_image_only_on_prefill_and_stops_at_eos(self):
         model = FakeReferenceModel()
         prompt = torch.tensor([[1, 3, 4]])
-        pixels = {"pixel_values": torch.ones(1, 1, 3, 8, 8), "static_image_mask": torch.tensor([True])}
+        pixels = {"pixel_values": torch.ones(1, 3, 8, 8)}
 
         result = generate_greedy_text(model, prompt, eos_token_id=2, max_new_tokens=8, pixel_values=pixels)
 
@@ -159,7 +159,7 @@ class TestTextOnlyEvaluation(unittest.TestCase):
 
         answer = eval_sample(
             model, FakeTokenizer(), args, 0, "describe this image", None,
-            "unused.mp3", pixel_values={"pixel_values": torch.ones(1, 1, 3, 8, 8)},
+            "unused.mp3", pixel_values={"pixel_values": torch.ones(1, 3, 8, 8)},
         )
 
         self.assertEqual(answer, "5 2")
@@ -177,13 +177,22 @@ class TestTextOnlyEvaluation(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
         self.assertIn("--results_jsonl requires", result.stderr)
 
+    def test_video_mode_is_rejected_until_temporal_path_is_implemented(self):
+        entrypoint = Path(__file__).resolve().parents[1] / "eval_omni.py"
+        result = subprocess.run(
+            [sys.executable, str(entrypoint), "--mode", "6", "--text_only"],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--mode must contain only", result.stderr)
+
     def test_audio_encoder_loads_only_for_audio_input_modes(self):
         def args(mode, text_only=False):
             return SimpleNamespace(mode=mode, text_only=text_only)
 
-        self.assertEqual(parse_modes("4,6"), {"4", "6"})
-        self.assertEqual(parse_modes("-1"), set("0123456"))
-        self.assertFalse(needs_audio_encoder(args("0,1,3,4,6")))
+        self.assertEqual(parse_modes("4,5"), {"4", "5"})
+        self.assertEqual(parse_modes("-1"), set("012345"))
+        self.assertFalse(needs_audio_encoder(args("0,1,3,4")))
         self.assertTrue(needs_audio_encoder(args("2")))
         self.assertTrue(needs_audio_encoder(args("5")))
         self.assertFalse(needs_audio_encoder(args("2", text_only=True)))
@@ -201,7 +210,7 @@ class TestTextOnlyEvaluation(unittest.TestCase):
     def test_missing_answer_is_not_written(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "results.jsonl"
-            save_visual_result(str(path), "video", "clip.avi", "描述", None)
+            save_visual_result(str(path), "image", "cat.jpg", "描述", None)
             self.assertFalse(path.exists())
 
     def test_eval_sample_routes_visual_inputs_to_text_generation(self):

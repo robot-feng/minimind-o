@@ -71,7 +71,7 @@ MiniMind-O attempts to fill this gap: speech and text are connected directly at 
 - Two training datasets, `mini` and `full`. `mini` is meant for quick onboarding and runs the pipeline in ~2 hours on a single RTX 3090; `full` matches the released weights and covers Chinese speech and image tasks.
 - Multiple built-in voice prompts, unseen voice prompts and voice cloning from arbitrary reference audio, making voice-control experiments easy to reproduce.
 - A complete inference and demo toolkit: CLI, Web UI, streaming playback, barge-in interruption and a phone-mode demo.
-- Uses TIPSv2 B/14 for images; video inputs use up to 4 frames and reuse the image encoder. A still image is aligned to four static frame slots during training, evaluation and inference: it is encoded once and its features are reused across four 64-token image blocks. Real video inputs retain separate per-frame features.
+- Visual input currently supports one still image: TIPSv2 B/14 encodes one image and its projected features replace one 64-token image block. Video temporal modeling and video-supervised training are not implemented.
 - Key modules are written from scratch in native PyTorch without high-level third-party wrappers, while remaining compatible with `transformers` tokenizers and native weight formats.
 - A companion technical report covers architecture, training curves, CER / WER evaluation, voice-cloning similarity and cross-model comparisons. See the Tech Report badge at the top.
 
@@ -207,7 +207,7 @@ If unavailable, please download the matching `.whl` from [torch_stable](https://
 
 ### 1' Download data
 
-For a quick start, downloading only the `_mini` parquet files from the [dataset link](https://huggingface.co/datasets/jingyaogong/minimind-o_dataset) and placing them under `./dataset` is enough. The mini data has no image or video samples, so this small-model training pipeline reproduces speech capability; the video input path can be checked with your own clips after training.
+For a quick start, downloading only the `_mini` parquet files from the [dataset link](https://huggingface.co/datasets/jingyaogong/minimind-o_dataset) and placing them under `./dataset` is enough. The default mini data is mainly for quickly reproducing speech capability; single-image training and evaluation use `sft_i2t_mini.parquet`. Video input is not currently supported.
 
 ### 2' Train
 
@@ -231,28 +231,22 @@ python eval_omni.py --weight sft_omni
 
 Generated speech is exported as MP3 by default. If FFmpeg is unavailable, evaluation keeps the decoded WAV and prints its path.
 
-Video inference uniformly samples up to 4 frames and adds a timestamp before each frame:
+To evaluate single-image-to-text without generating speech, skip the audio modules and run:
 
 ```bash
-python eval_omni.py --weight sft_zero --mode 6 --video_dir ./dataset/videos --video_frames 4
+python eval_omni.py --weight sft_full_a2a --mode 4 --text_only --prompt_lang 1 --image_dir ./dataset/eval_omni --max_new_tokens 128 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_full_a2a.jsonl
 ```
 
-To evaluate image/video-to-text without generating speech, skip the audio modules and run:
-
-```bash
-python eval_omni.py --weight sft_full_a2a --mode 4,6 --text_only --prompt_lang 1 --image_dir ./dataset/eval_omni --video_dir ./out/eval_video --max_new_tokens 128 --temperature 0 --seed 42 --results_jsonl ./out/eval_intermediate/sft_full_a2a.jsonl
-```
-
-This reads images from `dataset/eval_omni` and videos from `out/eval_video`; there are currently no video files in `dataset/eval_omni`. `sft_full_a2a` is the weight prefix currently available in this repository; replace `--weight` when using another checkpoint.
+This reads images from `dataset/eval_omni`. `sft_full_a2a` is the weight prefix currently available in this repository; replace `--weight` when using another checkpoint. The evaluator rejects video mode so frame concatenation without temporal supervision cannot be mistaken for video understanding.
 `--results_jsonl` saves the mode, filename, prompt and answer for each sample. A fixed seed and greedy decoding make runs reproducible and easier to compare across checkpoints.
-To compare with the README image-to-speech examples, omit `--text_only`: the same command then saves Thinker text, Talker audio and per-image JSONL. Image/video-only modes do not load SenseVoice, which is only used for speech input.
+To compare with the README image-to-speech examples, omit `--text_only`: the same command then saves Thinker text, Talker audio and per-image JSONL. Image-only mode does not load SenseVoice, which is only used for speech input.
 
 ```bash
 python eval_omni.py --weight sft_omni --mode 4 --prompt_lang 0 --max_new_tokens 80 --temperature 0 --seed 42 --image_dir ./dataset/eval_omni --output_dir ./out/eval_image_audio_en --results_jsonl ./out/eval_intermediate/sft_omni_image_audio_en.jsonl
 ```
 
 Audio is saved under `output_dir`; WAV is retained if MP3 export is unavailable.
-After full training, run `bash scripts/eval_full_omni.sh` for a consistent regression pass: text, audio-input and video checks; English image-to-text-and-speech examples on the 9 fixed images; Chinese and English text-only visual evaluation; a same-prompt, per-image comparison against `sft_i2t_mini`; and a direct reference run with the upstream `jingyaogong/minimind-3o` release using SigLIP2. The upstream model receives its native single-image, one-frame input and its original text-then-image-marker layout; the local TIPSv2 model uses four repeated static-image frames and puts visual markers first. They receive the same images and semantic user prompts while preserving each model's training-time input layout. Per-image JSONL, concept-metric JSON, PNG comparison charts, Markdown summary tables and generated audio are written to `out/eval_intermediate/` and `out/eval_full_audio/`. The release comparison is saved as `sft_omni_vs_minimind-3o-release-siglip2_visual_comparison.png` and `.md`. Interpret the small-set scores together with the actual per-image answers.
+After full training, run `bash scripts/eval_full_omni.sh` for a consistent regression pass: text and audio-input checks; English image-to-text-and-speech examples on the 9 fixed images; Chinese and English text-only visual evaluation; a same-prompt, per-image comparison against `sft_i2t_mini`; and a direct reference run with the upstream `jingyaogong/minimind-3o` release using SigLIP2. Both models receive one image; the local TIPSv2 model puts its single visual marker block before text, while the upstream model keeps its original text-then-image-marker layout. Per-image JSONL, concept-metric JSON, PNG comparison charts, Markdown summary tables and generated audio are written to `out/eval_intermediate/` and `out/eval_full_audio/`. The release comparison is saved as `sft_omni_vs_minimind-3o-release-siglip2_visual_comparison.png` and `.md`. Interpret the small-set scores together with the actual per-image answers.
 
 Set `EVAL_REFERENCE_MODEL` and `EVAL_REFERENCE_VISION` to use local mirrors or cached paths for the release model and SigLIP2 encoder. The reference run uses the same `eval_omni` samples and greedy decoding.
 For the 9 images in `dataset/eval_omni`, compute concept coverage against the manually checked labels:
@@ -264,7 +258,7 @@ python eval_visual_metrics.py ./out/eval_intermediate/sft_i2t_mini.jsonl
 
 The script reports mean concept recall and the fraction of images with every annotated concept hit. Labels are in `dataset/eval_omni/visual_references.json`. This keyword-coverage metric is limited to a small fixed set; it does not measure hallucinations, relations or fluency. Inspect the JSONL answers as well, and do not treat this as a general visual-capability score.
 
-### Interim results on the 9-image set (2026-09-27)
+### Previous four-frame pilot on the 9-image set (2026-09-27; not an acceptance result for the current single-image implementation)
 
 | Checkpoint | Prompt | Images | Mean concept recall | All concepts hit |
 | --- | --- | ---: | ---: | ---: |
@@ -274,13 +268,11 @@ The script reports mean concept recall and the fraction of images with every ann
 
 ![Interim visual evaluation](images/visual_eval_interim_20260927.png)
 
-The standalone TIPSv2 encoder ranks each image's matching caption first (9/9) among image-specific candidates. This is a small retrieval diagnostic, not open-ended caption accuracy or a substitute for MiniMind-O generation evaluation. With `sft_i2t_mini_768.pth` and the same prompt, image input changes the final-position logits compared with no image, but the orange-cat and fruit images produce logits with cosine similarity 0.999983 and the same greedy next token. The new four-slot static-image path matches the legacy single-image path exactly (maximum logit difference 0). The input path is connected, while the model has not learned useful image-to-language semantics.
+The standalone TIPSv2 encoder ranks each image's matching caption first (9/9) among image-specific candidates. This is a small retrieval diagnostic, not open-ended caption accuracy or a substitute for MiniMind-O generation evaluation. The previous four-frame pilot checkpoint had near-zero concept recall on this set and did not pass visual-quality acceptance. The code now uses single-image inputs; those old checkpoint metrics do not evaluate the current implementation, which must be retrained and reevaluated.
 
-`dataset/sft_i2t_mini.parquet` contains 10,000 rows, about 0.34% of the 2,904,511-row full I2T dataset; 9,250 rows contain a user image marker, about 0.32% of full I2T. The previous full I2T attempts stopped on two visual-input edge cases: DataLoader could not pin zero-stride static-frame tensors, and a long prompt was truncated to 29 image tokens although each block must retain all 64. Both are fixed: training and inference now put visual markers before text, long-sample trimming preserves complete image blocks and the final assistant target, and static frames are materialized before DataLoader pinning. The table above is still from pre-fix intermediate checkpoints. Full I2T training must resume and be reevaluated before comparing with the README examples.
+`dataset/sft_i2t_mini.parquet` contains 10,000 rows, about 0.34% of the 2,904,511-row full I2T dataset; 9,250 rows contain a user image marker, about 0.32% of full I2T. Long-sample trimming preserves the complete 64-token image block and the final assistant target. The next step is to train the single-image path on the mini I2T data and rerun the fixed-set evaluation; image quality is not considered reproduced until it passes.
 
-You can also call `MiniMindOmni.generate_text(..., pixel_values=...)` directly. It accepts the same visual input formats as `forward`: `{"pixel_values": image_tensor}`, a `[B, C, H, W]` image tensor, or a `[B, F, C, H, W]` video-frame tensor. The input token sequence must contain one matching `<|image_pad|>` block per image or frame, with visual markers before the text prompt. Evaluation and the Web Demo expand a still image to four static frame slots; training uses the same layout and a static-image mask to reuse one encoder result. This path runs only the Thinker and is useful for isolating visual understanding.
-
-Following common VLM practice, the video path decodes a clip, samples ordered frames over time, keeps their timestamps and passes them through the vision encoder. Short clips repeat the final frame to reach the fixed frame count. Qwen2.5-VL additionally uses dynamic-FPS sampling and temporal position encoding ([official implementation](https://github.com/QwenLM-corp/Qwen2.5-VL), [technical report](https://arxiv.org/abs/2502.13923)). To keep this small model and its sequence format simple, MiniMind-O reuses TIPSv2's image encoder for up to four frames and passes timestamps as text markers to the Thinker. A still image expands to four static frame slots and maps to four image-feature blocks; real video frames retain separate features. The repository has no temporal video supervision, so video input support alone does not imply learned temporal understanding.
+You can also call `MiniMindOmni.generate_text(..., pixel_values=...)` directly. Visual input accepts `{"pixel_values": image_tensor}` or `[B, C, H, W]`. Each sample corresponds to exactly one contiguous 64-token `<|image_pad|>` block, placed before the text prompt. This implementation intentionally covers still images only. Video understanding is deferred: ordered frame tokens or textual timestamps alone do not provide temporal position encoding or video supervision. A future video path needs a separate spatiotemporal design and evaluation.
 
 # 📌 Model Details
 
@@ -424,7 +416,7 @@ The last command aligns outputs by `source` and reports aggregate metric changes
 
 ### MiniMind training capabilities in MiniMind-O
 
-The language-model training capabilities from upstream MiniMind's `trainer/` have been adapted under the root `trainer/` directory to use MiniMind-O's model, tokenizer and checkpoint formats. Text pretraining, text SFT, LoRA, distillation and preference/RL currently train only the Thinker text path. Audio and image supervision use `train_sft_omni.py` above; still images are expanded to the same static frame tensor layout used by evaluation. Real video inputs support uniform frame sampling, timestamps and inference, but there is no video-temporal supervision dataset yet.
+The language-model training capabilities from upstream MiniMind's `trainer/` have been adapted under the root `trainer/` directory to use MiniMind-O's model, tokenizer and checkpoint formats. Text pretraining, text SFT, LoRA, distillation and preference/RL currently train only the Thinker text path. Audio and single-image supervision use `train_sft_omni.py` above. Video input and video-temporal training are not implemented.
 
 | Capability | MiniMind-O entry point | Data / notes |
 |---|---|---|

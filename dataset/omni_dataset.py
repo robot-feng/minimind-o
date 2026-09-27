@@ -12,7 +12,6 @@ from scipy.signal import resample
 from torch.utils.data import Dataset
 import pyarrow as pa
 import pyarrow.parquet as pq
-from dataset.video import DEFAULT_VIDEO_FRAMES, format_static_image_prompt, repeat_static_image_frames
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -50,10 +49,8 @@ class OmniDataset(Dataset):
                  audio_spk_token=2051,  # <|audio_spk|>
                  audio_vocab_size=2112,  # 2048 mimi codes + 64 special tokens
                  scheduled_sampling=0.05,
-                 image_token_len=64, video_frames=DEFAULT_VIDEO_FRAMES):
+                 image_token_len=64):
         super().__init__()
-        if video_frames < 1:
-            raise ValueError("video_frames must be positive")
         tables = [pa.Table.from_batches(pq.ParquetFile(p.strip()).iter_batches()) for p in data_path.split(',')]
         tables = [t.cast(pa.schema([f.with_type(pa.large_string()) if pa.types.is_string(f.type) else f for f in t.schema])) for t in tables]
         self.table = pa.concat_tables(tables, promote_options='default')
@@ -61,11 +58,9 @@ class OmniDataset(Dataset):
         self.audio_processor = audio_processor
         self.vision_processor = vision_processor
         self.max_length = max_length
-        self.video_frames = video_frames
         self.audio_token = audio_special_token
         self.image_token_len = image_token_len
         self.image_token = image_special_token * image_token_len
-        self.image_frame_prompt = format_static_image_prompt(self.image_token, video_frames)
         self.audio_stop_token = audio_stop_token
         self.audio_pad_token = audio_pad_token
         self.audio_spk_token = audio_spk_token
@@ -155,8 +150,8 @@ class OmniDataset(Dataset):
         if not image_bytes or self.vision_processor is None: return None
         image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
         inputs = self.vision_processor(images=image, return_tensors="pt")
-        if hasattr(inputs, 'keys'): return {k: v for k, v in inputs.items()}
-        return inputs.pixel_values
+        pixels = inputs['pixel_values'] if hasattr(inputs, 'keys') else inputs.pixel_values
+        return {'pixel_values': pixels.squeeze(0), 'image_mask': torch.tensor(True)}
 
     def create_chat_prompt(self, conversations, audio_features_length=0, image_first=False):
         conversations = pre_processing_chat(conversations)
@@ -187,9 +182,6 @@ class OmniDataset(Dataset):
 
     def fit_visual_sequence(self, input_ids):
         """Keep complete image blocks and the final supervised answer within the context limit."""
-        if len(input_ids) <= self.max_length:
-            return input_ids
-
         image_spans = []
         index = 0
         while index < len(input_ids):
@@ -207,13 +199,15 @@ class OmniDataset(Dataset):
                 )
             image_spans.append((start, index))
 
-        expected_tokens = self.video_frames * self.image_token_len
+        expected_tokens = self.image_token_len
         found_tokens = sum(end - start for start, end in image_spans)
-        if found_tokens != expected_tokens:
+        if len(image_spans) != 1 or found_tokens != expected_tokens:
             raise ValueError(
-                f"visual prompt has {found_tokens} image tokens; expected {expected_tokens} "
-                "for one image aligned to the configured frame slots"
+                f"visual prompt has {found_tokens} image tokens in {len(image_spans)} blocks; "
+                f"expected one image block of {expected_tokens} tokens"
             )
+        if len(input_ids) <= self.max_length:
+            return input_ids
 
         _, assistant_ranges = self.generate_text_labels(input_ids)
         image_start, image_end = image_spans[0][0], image_spans[-1][1]
@@ -309,23 +303,20 @@ class OmniDataset(Dataset):
                 if len(self.tokenizer(test_prompt).input_ids) + 100 < self.max_length:
                     break
         
-        # A still image occupies the same fixed frame axis as video, with its
-        # temporal features marked as static so the encoder runs only once.
         pixel_values = None
         has_image_marker = any(
             '<image>' in str(turn.get('content', ''))
             for turn in conversations if turn.get('role') == 'user'
         )
+        if has_image_marker and (not image_bytes or self.vision_processor is None):
+            raise ValueError("an <image> sample requires image_bytes and a vision_processor")
+        if sum(
+            str(turn.get('content', '')).count('<image>')
+            for turn in conversations if turn.get('role') == 'user'
+        ) > 1:
+            raise ValueError("this training path supports exactly one image per sample")
         if has_image_marker and image_bytes and self.vision_processor:
             pixel_values = self.load_image_inputs(image_bytes[0])
-            frame_batch = repeat_static_image_frames(
-                pixel_values['pixel_values'], num_frames=self.video_frames
-            )
-            pixel_values = {
-                # DataLoader pin_memory cannot pin a zero-stride expand() view.
-                'pixel_values': frame_batch.squeeze(0).contiguous(),
-                'static_image_mask': torch.tensor(True),
-            }
         
         # 只加载最后一个user的audio（按user轮次索引访问）
         audio_inputs, audio_len, audio_features_length = None, 0, 0
@@ -346,8 +337,8 @@ class OmniDataset(Dataset):
         if pixel_values is None and self.vision_processor:
             image_size = getattr(self.vision_processor, 'image_size', 256)
             pixel_values = {
-                'pixel_values': torch.zeros(self.video_frames, 3, image_size, image_size),
-                'static_image_mask': torch.tensor(False),
+                'pixel_values': torch.zeros(3, image_size, image_size),
+                'image_mask': torch.tensor(False),
             }
         
         # 从answer_audios获取最后一个assistant的音频codes
@@ -367,7 +358,7 @@ class OmniDataset(Dataset):
         prompt = self.create_chat_prompt(
             conversations, audio_features_length, image_first=bool(has_visual_input)
         )
-        if pixel_values is not None: prompt = prompt.replace('<image>', self.image_frame_prompt)
+        if has_visual_input: prompt = prompt.replace('<image>', self.image_token)
         input_ids = self.tokenizer(prompt).input_ids
         if has_visual_input:
             input_ids = self.fit_visual_sequence(input_ids)

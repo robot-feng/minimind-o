@@ -9,7 +9,7 @@ from pydub import AudioSegment
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from model.model_omni import MiniMindOmni, RealtimeSession
-from dataset.video import DEFAULT_VIDEO_FRAMES, format_static_image_prompt, format_visual_prompt, repeat_static_image_frames
+from dataset.image import format_visual_prompt
 from trainer.trainer_utils import log_model_params
 logging.getLogger().setLevel(logging.ERROR)
 with contextlib.redirect_stdout(io.StringIO()):
@@ -59,10 +59,7 @@ def prep_audio(samples):
 def prep_image(b64):
     img = Image.open(io.BytesIO(base64.b64decode(b64))).convert('RGB')
     pixels = M['model'].vision_processor(images=img, return_tensors="pt")["pixel_values"]
-    return {
-        'pixel_values': repeat_static_image_frames(pixels, DEFAULT_VIDEO_FRAMES).to(M['device']),
-        'static_image_mask': torch.ones(1, dtype=torch.bool, device=M['device']),
-    }
+    return {'pixel_values': pixels.to(M['device'])}
 
 def build_ids(prompt, history):
     tok, dev, n = M['tokenizer'], M['device'], M['cfg'].max_history_turns
@@ -242,9 +239,8 @@ def prepare_turn(text, samples, image_b64, do_asr_for_image):
         pixel_values = prep_image(image_b64)
         m = M['model']
         image_tokens = m.config.image_special_token * m.config.image_token_len
-        image_frame_prompt = format_static_image_prompt(image_tokens, DEFAULT_VIDEO_FRAMES)
         prompt = format_visual_prompt(
-            image_frame_prompt, (prompt + "\n\n" if prompt else "") + "请描述这张图片"
+            image_tokens, (prompt + "\n\n" if prompt else "") + "请描述这张图片"
         )
     return audio_inputs, audio_lens, pixel_values, prompt, user_text, asr_thread, asr_result
 

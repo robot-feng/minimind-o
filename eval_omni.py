@@ -9,7 +9,7 @@ from PIL import Image
 from transformers import AutoImageProcessor, AutoModel, AutoTokenizer, AutoModelForCausalLM, MimiModel
 from model.model_omni import MiniMindOmni, OmniConfig
 from dataset.omni_dataset import OmniDataset
-from dataset.video import DEFAULT_VIDEO_FRAMES, VIDEO_EXTENSIONS, format_visual_prompt, prepare_image_inputs, prepare_video_inputs
+from dataset.image import format_visual_prompt, prepare_image_inputs
 from trainer.audio_output import save_generated_audio
 from trainer.trainer_utils import setup_seed, log_model_params
 warnings.filterwarnings('ignore')
@@ -24,7 +24,7 @@ def save_visual_result(path, mode, source, prompt, answer):
 
 
 def parse_modes(mode):
-    return set(mode.replace(',', '').replace('-1', '0123456'))
+    return set(mode.replace(',', '').replace('-1', '012345'))
 
 
 def needs_audio_encoder(args):
@@ -32,21 +32,19 @@ def needs_audio_encoder(args):
 
 
 def prepare_reference_image_inputs(pixel_values):
-    """Adapt the one-frame reference model input to its image-only interface."""
+    """Keep the upstream reference model on its native single-image interface."""
     if pixel_values is None:
         return None
     pixels = pixel_values.get('pixel_values') if isinstance(pixel_values, dict) else pixel_values
-    if pixels.ndim == 5:
-        if pixels.size(1) != 1:
-            raise ValueError("the upstream release reference supports one image frame per sample")
-        pixels = pixels[:, 0]
+    if pixels.ndim != 4:
+        raise ValueError("reference image input must have shape (batch, channels, height, width)")
     return {'pixel_values': pixels}
 
 
-def format_image_prompt(model, image_frame_prompt, prompt_text):
+def format_image_prompt(model, image_prompt, prompt_text):
     if getattr(model, '_use_reference_image_layout', False):
-        return f"{prompt_text.strip()}\n\n{image_frame_prompt.strip()}"
-    return format_visual_prompt(image_frame_prompt, prompt_text)
+        return f"{prompt_text.strip()}\n\n{image_prompt.strip()}"
+    return format_visual_prompt(image_prompt, prompt_text)
 
 
 @torch.inference_mode()
@@ -221,22 +219,22 @@ def main():
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
     parser.add_argument('--audio_dir', default='./dataset/eval_omni/', type=str, help="测试音频目录")
     parser.add_argument('--image_dir', default='./dataset/eval_omni/', type=str, help="测试图像目录")
-    parser.add_argument('--video_dir', default='./dataset/eval_omni/', type=str, help="测试视频目录")
-    parser.add_argument('--video_frames', default=DEFAULT_VIDEO_FRAMES, type=int, help="统一视觉帧数；单图复制到该帧数")
     parser.add_argument('--vision_dir', default='google/tipsv2-b14', type=str, help="TIPSv2视觉模型 ID 或本地路径")
     parser.add_argument('--open_thinking', default=0, type=int, help="是否开启思考模式（0=否，1=是）（思考模式下禁用audio输出）")
-    parser.add_argument('--text_only', action='store_true', help="仅生成文本，不加载或运行音频模块；适用于文本、图像和视频评估")
-    parser.add_argument('--results_jsonl', type=str, help="图像/视频评测：逐样本保存来源、提示和文本回答")
+    parser.add_argument('--text_only', action='store_true', help="仅生成文本，不加载或运行音频模块；适用于文本和图像评估")
+    parser.add_argument('--results_jsonl', type=str, help="图像评测：逐样本保存来源、提示和文本回答")
     parser.add_argument('--seed', type=int, help="固定随机种子以便复现实验")
     parser.add_argument('--decode_audio', default=1, type=int, help="是否解码音频输出（0=否，1=是）")
-    parser.add_argument('--mode', default='0', type=str, help="评估模式：-1=all 0=text 1=multi 2=audio 3=clone 4=image 5=mix 6=video（逗号组合，如 2,5）")
+    parser.add_argument('--mode', default='0', type=str, help="评估模式：-1=all 0=text 1=multi 2=audio 3=clone 4=image 5=mix（逗号组合，如 2,5）")
     parser.add_argument('--prompt_lang', default=0, type=int, choices=[0, 1, 2], help="问题语言：0=英文 1=中文 2=英文+中文")
     args = parser.parse_args()
     modes = parse_modes(args.mode)
+    if not modes or not modes <= set('012345'):
+        parser.error("--mode must contain only 0, 1, 2, 3, 4 or 5")
     if args.text_only and modes.intersection({'2', '3', '5'}):
         parser.error("--text_only cannot be combined with audio or mixed-input modes 2, 3, or 5")
-    if args.results_jsonl and not modes.intersection({'4', '6'}):
-        parser.error("--results_jsonl requires image or video mode 4/6")
+    if args.results_jsonl and '4' not in modes:
+        parser.error("--results_jsonl requires image mode 4")
     
     if not args.text_only:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -348,12 +346,12 @@ def main():
         for idx, image_file in enumerate(image_files):
             print(f'\n🖼️ [image-{idx+1}]: {image_file}')
             image = Image.open(os.path.join(args.image_dir, image_file)).convert('RGB')
-            pixel_values, image_frame_prompt = prepare_image_inputs(
-                image, model.vision_processor, model.config, args.device, args.video_frames
+            pixel_values, image_prompt = prepare_image_inputs(
+                image, model.vision_processor, model.config, args.device
             )
             prompts = [["Please describe this image."], ["请描述这张图片"], ["Please describe this image.", "请描述这张图片"]][args.prompt_lang]
             for lang_idx, prompt_text in enumerate(prompts):
-                prompt = format_image_prompt(model, image_frame_prompt, prompt_text)
+                prompt = format_image_prompt(model, image_prompt, prompt_text)
                 answer = eval_sample(model, tokenizer, args, idx, prompt, None,
                                      f"image-{idx:02d}-{lang_idx}-{os.path.splitext(image_file)[0]}.mp3",
                                      pixel_values=pixel_values)
@@ -367,8 +365,8 @@ def main():
         for idx, image_file in enumerate(image_files):
             audio_file = random.choice(img_audio_files)
             image = Image.open(os.path.join(args.image_dir, image_file)).convert('RGB')
-            pixel_values, image_frame_prompt = prepare_image_inputs(
-                image, model.vision_processor, model.config, args.device, args.video_frames
+            pixel_values, image_prompt = prepare_image_inputs(
+                image, model.vision_processor, model.config, args.device
             )
             for lang_idx, text_hint in enumerate(text_hints):
                 print(f'\n🌀 [mix-{idx+1}-{lang_idx}]: {text_hint} | {audio_file} | {image_file}')
@@ -377,27 +375,9 @@ def main():
                 audio_lens = torch.tensor([valid_len], device=args.device)
                 audio_token_len = valid_len or 1
                 prompt = format_visual_prompt(
-                    image_frame_prompt, text_hint + model.config.audio_special_token * audio_token_len
+                    image_prompt, text_hint + model.config.audio_special_token * audio_token_len
                 )
                 eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, f"mix-{idx:02d}-{lang_idx}-{os.path.splitext(image_file)[0]}.mp3", pixel_values=pixel_values, audio_lens=audio_lens)
-
-    if '6' in modes:
-        print('\n\n==================== video -> {text, audio} ====================')
-        video_files = sorted(f for f in os.listdir(args.video_dir)
-                             if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS)
-        prompts = [["Describe this video."], ["请描述这个视频"], ["Describe this video.", "请描述这个视频"]][args.prompt_lang]
-        for idx, video_file in enumerate(video_files):
-            video_path = os.path.join(args.video_dir, video_file)
-            pixel_values, frame_prompt = prepare_video_inputs(
-                video_path, model.vision_processor, model.config, args.device, args.video_frames
-            )
-            for lang_idx, prompt_text in enumerate(prompts):
-                prompt = format_visual_prompt(frame_prompt, prompt_text)
-                answer = eval_sample(model, tokenizer, args, idx, prompt, None,
-                                     f"video-{idx:02d}-{lang_idx}-{os.path.splitext(video_file)[0]}.mp3",
-                                     pixel_values=pixel_values)
-                save_visual_result(args.results_jsonl, "video", video_file, prompt, answer)
-
 
 if __name__ == "__main__":
     main()

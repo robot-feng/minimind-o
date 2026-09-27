@@ -22,7 +22,7 @@ from pydub import AudioSegment
 from transformers import AutoTokenizer, AutoModelForCausalLM, MimiModel, TextStreamer
 from model.model_omni import MiniMindOmni, OmniConfig
 from dataset.omni_dataset import OmniDataset
-from dataset.video import VIDEO_EXTENSIONS, format_visual_prompt, prepare_image_inputs, prepare_video_inputs
+from dataset.image import format_visual_prompt, prepare_image_inputs
 from trainer.trainer_utils import setup_seed, log_model_params
 logging.getLogger().setLevel(logging.ERROR)
 with contextlib.redirect_stdout(io.StringIO()):
@@ -32,6 +32,7 @@ with contextlib.redirect_stdout(io.StringIO()):
 warnings.filterwarnings('ignore')
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+VIDEO_EXTENSIONS = {'.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v'}
 model_lock = Lock()
 
 model, tokenizer, device, mimi_model, asr_model = None, None, None, None, None
@@ -164,18 +165,11 @@ def chat_stream(prompt, audio_input=None, image_input=None, voice_name="default"
         asr_thread.start()
 
     if image_input is not None:
-        extension = os.path.splitext(image_input)[1].lower() if isinstance(image_input, str) else ""
-        if extension in VIDEO_EXTENSIONS:
-            pixel_values, frame_prompt = prepare_video_inputs(
-                image_input, model.vision_processor, model.config, device
-            )
-            prompt = format_visual_prompt(frame_prompt, prompt)
-        else:
-            image = Image.open(image_input).convert('RGB') if isinstance(image_input, str) else image_input.convert('RGB')
-            pixel_values, image_frame_prompt = prepare_image_inputs(
-                image, model.vision_processor, model.config, device
-            )
-            prompt = format_visual_prompt(image_frame_prompt, prompt)
+        image = Image.open(image_input).convert('RGB') if isinstance(image_input, str) else image_input.convert('RGB')
+        pixel_values, image_prompt = prepare_image_inputs(
+            image, model.vision_processor, model.config, device
+        )
+        prompt = format_visual_prompt(image_prompt, prompt)
 
     if voice_name != "default" and voice_name in voices_data:
         v = voices_data[voice_name]
@@ -228,15 +222,20 @@ def launch_gradio(server_name="0.0.0.0", server_port=8888):
     def respond(message, audio, voice, chat_history, model_history, max_turns):
         text = message.get("text", "") if isinstance(message, dict) else (message or "")
         files = message.get("files", []) if isinstance(message, dict) else []
+        if any(os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS for f in files):
+            yield chat_history + [{
+                "role": "assistant",
+                "content": "当前版本只支持单张图片；视频时序理解尚未实现。",
+            }], gr.update(), gr.update(), model_history, ""
+            return
         visual_path = next(
-            (f for f in files if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS | IMAGE_EXTENSIONS),
+            (f for f in files if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS),
             None,
         )
-        is_video = visual_path is not None and os.path.splitext(visual_path)[1].lower() in VIDEO_EXTENSIONS
-        question = text or ("请描述这个视频" if is_video else "请描述这张图片")
+        question = text or "请描述这张图片"
 
         if not text and audio is None and visual_path is None:
-            yield chat_history + [{"role": "assistant", "content": "请输入文本、上传图片或视频，或录制音频"}], gr.update(), gr.update(), model_history, ""
+            yield chat_history + [{"role": "assistant", "content": "请输入文本、上传图片，或录制音频"}], gr.update(), gr.update(), model_history, ""
             return
 
         if audio is not None:
@@ -281,7 +280,7 @@ def launch_gradio(server_name="0.0.0.0", server_port=8888):
         yield chat_history, final_audio if final_audio else gr.update(), None, model_history, ""
 
     with gr.Blocks(title="MiniMind-O", js="()=>{new MutationObserver(()=>{const m=document.getElementById('mic-box');if(!m)return;const h=!!m.querySelector('audio');document.body.classList.toggle('has-audio',h);const t=document.querySelector('textarea');if(t){t.placeholder=h?'已加载语音，点击发送':'输入文本';t.disabled=h}}).observe(document.body,{childList:true,subtree:true})}", css=".app{padding-top:6px!important} #component-0{gap:6px!important} #component-1{padding:2px 0!important;margin:0!important;min-height:0!important;border:none!important} #component-1 .padding{padding:0!important} #chatbox img{max-width:120px!important;max-height:120px!important;border-radius:8px} textarea{overflow-y:hidden!important;height:auto!important;min-height:30px!important;max-height:60px!important} #mic-box{max-height:150px!important;overflow:hidden!important} #mic-box .wrap span.or,#mic-box .wrap span:first-child{display:none!important} #mic-box .wrap{font-size:0!important;min-height:40px!important;padding:8px!important} #mic-box .wrap::after{content:'上传/录音';font-size:14px!important} #mic-box .mic-select{display:none!important} .has-audio textarea{opacity:0.4!important;pointer-events:none!important} .has-audio .upload-button,.has-audio [data-testid='upload-button']{display:none!important} @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}") as demo:
-        gr.HTML('<div style="text-align:center;margin:2px 0"><span style="font-size:1.2rem;font-weight:bold;font-style:italic">MiniMind-O</span> <span style="color:#999;font-size:0.8rem">text / image / video / audio → text + audio</span></div>')
+        gr.HTML('<div style="text-align:center;margin:2px 0"><span style="font-size:1.2rem;font-weight:bold;font-style:italic">MiniMind-O</span> <span style="color:#999;font-size:0.8rem">text / image / audio → text + audio</span></div>')
 
         chatbot = gr.Chatbot(label="", height=380, elem_id="chatbox", type="messages")
         model_history = gr.State([])
@@ -291,7 +290,7 @@ def launch_gradio(server_name="0.0.0.0", server_port=8888):
             with gr.Column(scale=0, min_width=160):
                 aud = gr.Audio(sources=["upload", "microphone"], type="numpy", show_label=False, elem_id="mic-box")
             with gr.Column(scale=4):
-                msg = gr.MultimodalTextbox(placeholder="输入文本，或上传图片/视频", show_label=False, submit_btn="发送")
+                msg = gr.MultimodalTextbox(placeholder="输入文本，或上传图片", show_label=False, submit_btn="发送")
         with gr.Row():
             voice_dd = gr.Dropdown(choices=voice_choices, value="default", label="音色选择", scale=0, min_width=140)
             turns_dd = gr.Dropdown(choices=[0, 2, 4, 6, 8], value=0, label="多轮记忆", scale=0, min_width=120)

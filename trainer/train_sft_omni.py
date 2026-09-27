@@ -23,7 +23,7 @@ warnings.filterwarnings('ignore')
 
 
 def omni_collate_fn(batch):
-    """Collate variable audio and frame batches while preserving sample order."""
+    """Collate variable audio and one-image-per-sample batches."""
     input_ids, labels, audio_labels, audio_inputs, audio_lens, pixel_values, spk_emb = zip(*batch)
     input_ids = torch.stack(input_ids)
     labels = torch.stack(labels)
@@ -36,60 +36,29 @@ def omni_collate_fn(batch):
         audio_inputs = torch.cat(padded, dim=0)
     else:
         audio_inputs = None
-    image_tensors = []
-    static_image_mask = []
-    for item in pixel_values:
-        if item is None:
-            image_tensors.append(None)
-            static_image_mask.append(False)
-            continue
-        if isinstance(item, dict):
-            image_tensors.append(item['pixel_values'])
-            flag = item.get('static_image_mask', False)
-            static_image_mask.append(bool(flag.item()) if torch.is_tensor(flag) else bool(flag))
-        else:
-            image_tensors.append(item)
-            static_image_mask.append(False)
-
+    image_tensors = [item['pixel_values'] if isinstance(item, dict) else item for item in pixel_values]
+    image_mask = [
+        bool(item.get('image_mask', True)) if isinstance(item, dict) else item is not None
+        for item in pixel_values
+    ]
     valid_images = [image for image in image_tensors if image is not None]
     if valid_images:
         normalized = []
         for image in valid_images:
-            if image.ndim == 3:
-                image = image.unsqueeze(0)
-            elif image.ndim == 5 and image.size(0) == 1:
+            if image.ndim == 4 and image.size(0) == 1:
                 image = image.squeeze(0)
-            if image.ndim != 4:
-                raise ValueError('each visual sample must have shape (frames, channels, height, width)')
+            if image.ndim != 3:
+                raise ValueError('each visual sample must have shape (channels, height, width)')
             normalized.append(image)
-        max_frames = max(image.size(0) for image in normalized)
-        prototype = normalized[0][0]
-        if all(static_image_mask) and all(image.size(0) >= max_frames for image in normalized):
-            # A still image is represented as a zero-copy repeated frame view.
-            base_images = torch.stack([image[0] for image in normalized])
-            pixel_values = {
-                'pixel_values': base_images.unsqueeze(1).expand(-1, max_frames, -1, -1, -1).contiguous(),
-                'static_image_mask': torch.ones(len(normalized), dtype=torch.bool),
-            }
-            spk_emb = torch.stack(spk_emb)
-            return input_ids, labels, audio_labels, audio_inputs, audio_lens, pixel_values, spk_emb
-        padded = []
+        prototype = normalized[0]
+        if any(image.shape != prototype.shape for image in normalized):
+            raise ValueError('visual samples in a batch must share channel and spatial dimensions')
         image_iter = iter(normalized)
-        for image in image_tensors:
-            if image is None:
-                frames = prototype.new_zeros(max_frames, *prototype.shape)
-            else:
-                image = next(image_iter)
-                if image.shape[1:] != prototype.shape:
-                    raise ValueError('visual samples in a batch must share channel and spatial dimensions')
-                if image.size(0) < max_frames:
-                    image = torch.cat((image, image[-1:].expand(max_frames - image.size(0), *image.shape[1:])), dim=0)
-                frames = image
-            padded.append(frames)
-        pixel_values = {
-            'pixel_values': torch.stack(padded),
-            'static_image_mask': torch.tensor(static_image_mask, dtype=torch.bool),
-        }
+        pixels = torch.stack([
+            next(image_iter) if image is not None else prototype.new_zeros(prototype.shape)
+            for image in image_tensors
+        ])
+        pixel_values = {'pixel_values': pixels, 'image_mask': torch.tensor(image_mask, dtype=torch.bool)}
     else:
         pixel_values = None
     spk_emb = torch.stack(spk_emb)
@@ -197,7 +166,6 @@ if __name__ == "__main__":
     parser.add_argument('--freeze_backbone', default='none', type=str, choices=['none', 'all', 'last1'], help="冻结主干模型: none=全量训练, all=只训练audio层, last1=只训练最后1层+audio层")
     parser.add_argument('--mode', default='all', type=str, choices=['all', 'audio_proj', 'vision_proj'], help="训练模式: all=全量训练, audio_proj=只训练audio_proj, vision_proj=只训练vision_proj")
     parser.add_argument('--vision_only', action='store_true', help="仅训练Thinker视觉文本路径，跳过音频编码与Talker；适用于I2T数据")
-    parser.add_argument('--video_frames', default=4, type=int, help="单图训练时复制到的统一帧数")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-O-SFT", help="wandb项目名")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
@@ -206,8 +174,6 @@ if __name__ == "__main__":
         parser.error("--accumulation_steps must be at least 1")
     if args.save_interval < 1:
         parser.error("--save_interval must be at least 1")
-    if args.video_frames < 1:
-        parser.error("--video_frames must be positive")
     if args.vision_only and args.mode == 'audio_proj':
         parser.error("--vision_only cannot be combined with --mode audio_proj")
 
@@ -276,7 +242,6 @@ if __name__ == "__main__":
         vision_processor=model.vision_processor,
         max_length=args.max_seq_len,
         image_token_len=model.config.image_token_len,
-        video_frames=args.video_frames,
     )
     
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None

@@ -58,13 +58,11 @@ echo "reference_model=$REFERENCE_MODEL"
 echo "reference_vision=$REFERENCE_VISION"
 echo "dry_run=${DRY_RUN:-0}"
 
-echo "=== Text, audio-input, and video evaluation ==="
+echo "=== Text and audio-input evaluation ==="
 eval_python "$ROOT/eval_omni.py" \
-    --weight "$WEIGHT" --mode 0,2,6 --prompt_lang 2 --max_new_tokens 128 \
+    --weight "$WEIGHT" --mode 0,2 --prompt_lang 2 --max_new_tokens 128 \
     --seed 42 --output_dir "$AUDIO_DIR" \
-    --audio_dir "$ROOT/dataset/eval_omni" \
-    --video_dir "$ROOT/out/eval_video" --video_frames 4 \
-    --results_jsonl "$RESULTS_DIR/${WEIGHT}_video.jsonl"
+    --audio_dir "$ROOT/dataset/eval_omni"
 
 echo "=== English image-to-text-and-audio evaluation ==="
 eval_python "$ROOT/eval_omni.py" \
@@ -83,9 +81,9 @@ eval_python "$ROOT/eval_omni.py" \
     --weight "$WEIGHT" --mode 4 --text_only --prompt_lang 0 --max_new_tokens 80 \
     --temperature 0 --seed 42 --image_dir "$ROOT/dataset/eval_omni" \
     --results_jsonl "$RESULTS_DIR/${WEIGHT}_image_text_en.jsonl"
-echo "=== Upstream released model reference (SigLIP2, one image frame) ==="
+echo "=== Upstream released model reference (SigLIP2, one image) ==="
 eval_python "$ROOT/eval_omni.py" \
-    --load_from "$REFERENCE_MODEL" --vision_dir "$REFERENCE_VISION" --video_frames 1 \
+    --load_from "$REFERENCE_MODEL" --vision_dir "$REFERENCE_VISION" \
     --mode 4 --text_only --prompt_lang 0 --max_new_tokens 80 \
     --temperature 0 --seed 42 --image_dir "$ROOT/dataset/eval_omni" \
     --results_jsonl "$RESULTS_DIR/${REFERENCE_LABEL}_image_text_en.jsonl"
