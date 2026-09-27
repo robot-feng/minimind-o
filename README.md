@@ -251,7 +251,7 @@ python eval_omni.py --weight sft_omni --mode 4 --prompt_lang 0 --max_new_tokens 
 ```
 
 音频写入 `output_dir`；若 MP3 导出依赖不可用，程序会保留 WAV。
-全量训练完成后，可运行 `bash scripts/eval_full_omni.sh` 生成统一回归结果：包含文本、音频输入、视频检查，以及 9 张固定图片的英文图像转语音样例和中文纯视觉对照。逐图 JSONL、概念指标 JSON 与音频文件分别写入 `out/eval_intermediate/` 和 `out/eval_full_audio/`；这套固定集指标仍需结合逐图回答人工判断。
+全量训练完成后，可运行 `bash scripts/eval_full_omni.sh` 生成统一回归结果：包含文本、音频输入、视频检查，以及 9 张固定图片的英文图像转语音样例、中英文纯视觉评估和与 `sft_i2t_mini` 的同提示逐图对比。逐图 JSONL、概念指标 JSON、PNG 对比图与音频文件分别写入 `out/eval_intermediate/` 和 `out/eval_full_audio/`；这套固定集指标仍需结合逐图回答人工判断。
 对 `dataset/eval_omni` 的 9 张图片，还可用人工核对的核心概念计算覆盖率：
 
 ```bash

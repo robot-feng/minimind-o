@@ -252,7 +252,7 @@ python eval_omni.py --weight sft_omni --mode 4 --prompt_lang 0 --max_new_tokens 
 ```
 
 Audio is saved under `output_dir`; WAV is retained if MP3 export is unavailable.
-After full training, run `bash scripts/eval_full_omni.sh` for a consistent regression pass: text, audio-input and video checks, English image-to-text-and-speech examples on the 9 fixed images, and a Chinese text-only visual control. Per-image JSONL, concept-metric JSON and generated audio are written to `out/eval_intermediate/` and `out/eval_full_audio/`; interpret the small-set scores together with the actual per-image answers.
+After full training, run `bash scripts/eval_full_omni.sh` for a consistent regression pass: text, audio-input and video checks; English image-to-text-and-speech examples on the 9 fixed images; Chinese and English text-only visual evaluation; and a same-prompt, per-image comparison against `sft_i2t_mini`. Per-image JSONL, concept-metric JSON, a PNG comparison chart and generated audio are written to `out/eval_intermediate/` and `out/eval_full_audio/`; interpret the small-set scores together with the actual per-image answers.
 For the 9 images in `dataset/eval_omni`, compute concept coverage against the manually checked labels:
 
 ```bash

@@ -95,5 +95,8 @@ eval_visual_metric "$RESULTS_DIR/${WEIGHT}_image_text_zh.jsonl" \
 eval_visual_comparison "$RESULTS_DIR/${BASELINE_WEIGHT}_image_text_en.jsonl" \
     "$RESULTS_DIR/${WEIGHT}_image_text_en.jsonl" \
     "$RESULTS_DIR/${WEIGHT}_vs_${BASELINE_WEIGHT}_image_text_en.json"
+eval_python "$ROOT/scripts/plot_visual_comparison.py" \
+    "$RESULTS_DIR/${WEIGHT}_vs_${BASELINE_WEIGHT}_image_text_en.json" \
+    --output "$RESULTS_DIR/${WEIGHT}_visual_comparison.png"
 
 echo "evaluation_exit=0"
