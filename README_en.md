@@ -270,7 +270,13 @@ The script reports mean concept recall and the fraction of images with every ann
 
 The standalone TIPSv2 encoder ranks each image's matching caption first (9/9) among image-specific candidates. This is a small retrieval diagnostic, not open-ended caption accuracy or a substitute for MiniMind-O generation evaluation. The previous four-frame pilot checkpoint had near-zero concept recall on this set and did not pass visual-quality acceptance. The code now uses single-image inputs; those old checkpoint metrics do not evaluate the current implementation, which must be retrained and reevaluated.
 
-`dataset/sft_i2t_mini.parquet` contains 10,000 rows, about 0.34% of the 2,904,511-row full I2T dataset; 9,250 rows contain a user image marker, about 0.32% of full I2T. Long-sample trimming preserves the complete 64-token image block and the final assistant target. The next step is to train the single-image path on the mini I2T data and rerun the fixed-set evaluation; image quality is not considered reproduced until it passes.
+`dataset/sft_i2t_mini.parquet` contains 10,000 rows, about 0.34% of the 2,904,511-row full I2T dataset; 9,250 rows contain a user image marker, about 0.32% of full I2T. Long-sample trimming preserves the complete 64-token image block and the final assistant target. The single-image TIPS reproduction workflow is tracked at `scripts/wait_and_train_tips_single_image.py`. It requires `out/sft_full_a2a_768.pth` and the mini I2T dataset, defaults to four GPUs (`0,1,2,3`), waits until visible GPU compute processes exit and the GPUs remain idle for 15 seconds, then trains the vision projector followed by single-image I2T fine-tuning. It uses a separate checkpoint prefix, checks five finite loss reports at the 100-step logging cadence before announcing stable training, and evaluates Chinese and English prompts on the 9 fixed images in `dataset/eval_omni`. Per-image JSONL, concept metrics, a PNG chart and a Markdown table are written to `out/eval_intermediate/tips_single_image_20260927/` after training. This run has not yet produced verified visual-quality results; image capability is not considered reproduced until the fixed-set outputs pass review.
+
+Run the single-image workflow from the `minimind` environment:
+
+```bash
+python scripts/wait_and_train_tips_single_image.py
+```
 
 You can also call `MiniMindOmni.generate_text(..., pixel_values=...)` directly. Visual input accepts `{"pixel_values": image_tensor}` or `[B, C, H, W]`. Each sample corresponds to exactly one contiguous 64-token `<|image_pad|>` block, placed before the text prompt. This implementation intentionally covers still images only. Video understanding is deferred: ordered frame tokens or textual timestamps alone do not provide temporal position encoding or video supervision. A future video path needs a separate spatiotemporal design and evaluation.
 

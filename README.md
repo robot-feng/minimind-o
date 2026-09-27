@@ -269,7 +269,13 @@ python eval_visual_metrics.py ./out/eval_intermediate/sft_i2t_mini.jsonl
 
 单独的 TIPSv2 编码器在同一组图片的图像专属候选描述检索中 top-1 为 9/9；这不是开放式描述准确率，也不能替代 MiniMind-O 生成评估。此前四帧实现的 `sft_i2t_mini_768.pth` 在固定集上中英文概念召回都接近 0，视觉效果不合格。当前代码已切回单图输入；这些数值属于前一版试验 checkpoint，不能作为当前实现的成绩。单图实现必须重新训练并重新跑固定集评估。
 
-`dataset/sft_i2t_mini.parquet` 只有 10,000 行，约占 2,904,511 行 full I2T 的 0.34%；其中 9,250 行带用户图像标记，约占 full 数据的 0.32%。长样本裁剪会保留完整的 64-token 图像块和最后一条 assistant 监督目标。接下来应先用小模型和 mini I2T 数据跑通单图路径，再依据同一固定图片集重新评估；达到效果验收前，不把图像能力描述为复现成功。
+`dataset/sft_i2t_mini.parquet` 只有 10,000 行，约占 2,904,511 行 full I2T 的 0.34%；其中 9,250 行带用户图像标记，约占 full 数据的 0.32%。长样本裁剪会保留完整的 64-token 图像块和最后一条 assistant 监督目标。单图 TIPS 复现流程已整理为 `scripts/wait_and_train_tips_single_image.py`：它要求 `out/sft_full_a2a_768.pth` 和上述 mini I2T 数据，默认使用 4 张 GPU（`0,1,2,3`），等待可见 GPU 上的计算进程退出并保持空闲 15 秒后，先训练视觉 projector，再进行单图 I2T 微调。该流程使用独立 checkpoint 前缀，按每 100 步日志连续检查 5 次有限 loss 后才报告稳定，并在训练结束后对 `dataset/eval_omni` 的 9 张固定图片运行中英文评估，生成逐图 JSONL、概念指标、PNG 图和 Markdown 表，保存在 `out/eval_intermediate/tips_single_image_20260927/`。当前实验尚未产出新的质量验收结果；达到固定集效果验收前，不把图像能力描述为复现成功。
+
+在 `minimind` 环境中启动这条单图复现流程：
+
+```bash
+python scripts/wait_and_train_tips_single_image.py
+```
 
 也可直接调用 `MiniMindOmni.generate_text(..., pixel_values=...)`。视觉输入是 `{"pixel_values": image_tensor}` 或 `[B, C, H, W]`；每个样本恰好对应一个连续的 64-token `<|image_pad|>` 块，放在文本提示前。当前实现有意只覆盖单图，视频理解尚未实现：简单地按序输入多帧或添加文本时间戳，不等于具备时序位置编码和视频监督。后续需要独立设计并验证时空表示和视频数据，当前不宣称支持视频。
 
