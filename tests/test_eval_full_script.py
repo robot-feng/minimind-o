@@ -43,14 +43,19 @@ class FullEvaluationScriptTests(unittest.TestCase):
             self.assertIn("--mode 4 --prompt_lang 0", output)
             self.assertIn("--weight sft_i2t_mini --mode 4 --text_only --prompt_lang 0", output)
             self.assertIn("--weight sft_omni --mode 4 --text_only --prompt_lang 0", output)
+            self.assertIn("--load_from jingyaogong/minimind-3o", output)
+            self.assertIn("--vision_dir jingyaogong/siglip2-base-p32-256-ve --video_frames 1", output)
             self.assertIn("--mode 4 --text_only --prompt_lang 1", output)
             self.assertIn(str(results_dir / "sft_omni_image_audio_en.jsonl"), output)
             self.assertIn(str(results_dir / "sft_omni_image_text_zh.jsonl"), output)
             self.assertIn(str(results_dir / "sft_omni_image_audio_en_metrics.json"), output)
             self.assertIn(str(results_dir / "sft_omni_image_text_zh_metrics.json"), output)
             self.assertIn(str(results_dir / "sft_omni_vs_sft_i2t_mini_image_text_en.json"), output)
+            self.assertIn(str(results_dir / "sft_omni_vs_minimind-3o-release-siglip2_image_text_en.json"), output)
             self.assertIn(str(results_dir / "sft_omni_visual_comparison.png"), output)
             self.assertIn(str(results_dir / "sft_omni_visual_comparison.md"), output)
+            self.assertIn(str(results_dir / "sft_omni_vs_minimind-3o-release-siglip2_visual_comparison.png"), output)
+            self.assertIn(str(results_dir / "sft_omni_vs_minimind-3o-release-siglip2_visual_comparison.md"), output)
             self.assertIn(str(audio_dir), output)
             self.assertFalse((results_dir / "sft_omni_image_audio_en.jsonl").exists())
             self.assertFalse((results_dir / "sft_omni_image_audio_en_metrics.json").exists())
@@ -78,7 +83,9 @@ class FullEvaluationScriptTests(unittest.TestCase):
             completed = subprocess.run(
                 [sys.executable, str(ROOT / "scripts" / "plot_visual_comparison.py"),
                  str(comparison_path), "--output", str(image_path),
-                 "--markdown-output", str(markdown_path)],
+                 "--markdown-output", str(markdown_path),
+                 "--before-label", "minimind-3o-release-siglip2",
+                 "--after-label", "sft_omni", "--title", "Release reference vs TIPSv2"],
                 cwd=ROOT,
                 capture_output=True,
                 text=True,
@@ -93,7 +100,7 @@ class FullEvaluationScriptTests(unittest.TestCase):
             markdown = markdown_path.read_text(encoding="utf-8")
             self.assertIn("Mean concept recall", markdown)
             self.assertIn("Change (final - baseline)", markdown)
-            self.assertIn("sft_i2t_mini", markdown)
+            self.assertIn("minimind-3o-release-siglip2", markdown)
             self.assertIn("sft_omni", markdown)
 
     def test_comparison_plotter_rejects_missing_image_answers(self):

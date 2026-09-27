@@ -4,6 +4,9 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WEIGHT="${EVAL_WEIGHT:-sft_omni}"
 BASELINE_WEIGHT="${EVAL_BASELINE_WEIGHT:-sft_i2t_mini}"
+REFERENCE_MODEL="${EVAL_REFERENCE_MODEL:-jingyaogong/minimind-3o}"
+REFERENCE_VISION="${EVAL_REFERENCE_VISION:-jingyaogong/siglip2-base-p32-256-ve}"
+REFERENCE_LABEL="${EVAL_REFERENCE_LABEL:-minimind-3o-release-siglip2}"
 PYTHON_BIN="${PYTHON_BIN:-/data/miniconda3/envs/minimind/bin/python}"
 CONDA_BIN_DIR="${CONDA_BIN_DIR:-/data/miniconda3/bin}"
 RESULTS_DIR="${EVAL_RESULTS_DIR:-$ROOT/out/eval_intermediate}"
@@ -51,6 +54,8 @@ eval_visual_comparison() {
 echo "$(date '+evaluation_started_at=%F %T %Z')"
 echo "weight=$WEIGHT"
 echo "baseline_weight=$BASELINE_WEIGHT"
+echo "reference_model=$REFERENCE_MODEL"
+echo "reference_vision=$REFERENCE_VISION"
 echo "dry_run=${DRY_RUN:-0}"
 
 echo "=== Text, audio-input, and video evaluation ==="
@@ -78,6 +83,12 @@ eval_python "$ROOT/eval_omni.py" \
     --weight "$WEIGHT" --mode 4 --text_only --prompt_lang 0 --max_new_tokens 80 \
     --temperature 0 --seed 42 --image_dir "$ROOT/dataset/eval_omni" \
     --results_jsonl "$RESULTS_DIR/${WEIGHT}_image_text_en.jsonl"
+echo "=== Upstream released model reference (SigLIP2, one image frame) ==="
+eval_python "$ROOT/eval_omni.py" \
+    --load_from "$REFERENCE_MODEL" --vision_dir "$REFERENCE_VISION" --video_frames 1 \
+    --mode 4 --text_only --prompt_lang 0 --max_new_tokens 80 \
+    --temperature 0 --seed 42 --image_dir "$ROOT/dataset/eval_omni" \
+    --results_jsonl "$RESULTS_DIR/${REFERENCE_LABEL}_image_text_en.jsonl"
 
 echo "=== Chinese text-only image evaluation ==="
 eval_python "$ROOT/eval_omni.py" \
@@ -92,13 +103,24 @@ eval_visual_metric "$RESULTS_DIR/${WEIGHT}_image_text_en.jsonl" \
     "$RESULTS_DIR/${WEIGHT}_image_text_en_metrics.json"
 eval_visual_metric "$RESULTS_DIR/${WEIGHT}_image_text_zh.jsonl" \
     "$RESULTS_DIR/${WEIGHT}_image_text_zh_metrics.json"
+eval_visual_metric "$RESULTS_DIR/${REFERENCE_LABEL}_image_text_en.jsonl" \
+    "$RESULTS_DIR/${REFERENCE_LABEL}_image_text_en_metrics.json"
 eval_visual_comparison "$RESULTS_DIR/${BASELINE_WEIGHT}_image_text_en.jsonl" \
     "$RESULTS_DIR/${WEIGHT}_image_text_en.jsonl" \
     "$RESULTS_DIR/${WEIGHT}_vs_${BASELINE_WEIGHT}_image_text_en.json"
+eval_visual_comparison "$RESULTS_DIR/${REFERENCE_LABEL}_image_text_en.jsonl" \
+    "$RESULTS_DIR/${WEIGHT}_image_text_en.jsonl" \
+    "$RESULTS_DIR/${WEIGHT}_vs_${REFERENCE_LABEL}_image_text_en.json"
 eval_python "$ROOT/scripts/plot_visual_comparison.py" \
     "$RESULTS_DIR/${WEIGHT}_vs_${BASELINE_WEIGHT}_image_text_en.json" \
     --output "$RESULTS_DIR/${WEIGHT}_visual_comparison.png" \
     --markdown-output "$RESULTS_DIR/${WEIGHT}_visual_comparison.md" \
     --before-label "$BASELINE_WEIGHT" --after-label "$WEIGHT"
+eval_python "$ROOT/scripts/plot_visual_comparison.py" \
+    "$RESULTS_DIR/${WEIGHT}_vs_${REFERENCE_LABEL}_image_text_en.json" \
+    --output "$RESULTS_DIR/${WEIGHT}_vs_${REFERENCE_LABEL}_visual_comparison.png" \
+    --markdown-output "$RESULTS_DIR/${WEIGHT}_vs_${REFERENCE_LABEL}_visual_comparison.md" \
+    --before-label "$REFERENCE_LABEL" --after-label "$WEIGHT" \
+    --title "MiniMind-O visual evaluation: release reference vs TIPSv2 reproduction"
 
 echo "evaluation_exit=0"

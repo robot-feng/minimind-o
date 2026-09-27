@@ -90,7 +90,9 @@ def render_markdown_report(data, before_label, after_label):
     return "\n".join(lines) + "\n"
 
 
-def render_comparison(data, output_path):
+def render_comparison(
+    data, output_path, before_label="sft_i2t_mini", after_label="sft_omni", title=None
+):
     rows = data["per_image"]
 
     image = Image.new("RGB", (WIDTH, HEIGHT), "white")
@@ -101,7 +103,8 @@ def render_comparison(data, output_path):
     small_font = _font(15)
     metric_font = _font(16, bold=True)
 
-    _text_center(draw, WIDTH / 2, 28, "MiniMind-O visual evaluation · Mini baseline vs full model", title_font, COLORS["text"])
+    title = title or f"MiniMind-O visual evaluation · {before_label} vs {after_label}"
+    _text_center(draw, WIDTH / 2, 28, title, title_font, COLORS["text"])
     _text_center(draw, WIDTH / 2, 78, f"{len(rows)} fixed images · annotated concept coverage · greedy decoding", label_font, COLORS["muted"])
 
     left = (65, 160, 1035, 735)
@@ -134,9 +137,9 @@ def render_comparison(data, output_path):
 
     legend_y = 180
     draw.rectangle((left[0] + 265, legend_y, left[0] + 283, legend_y + 16), fill=before_color)
-    draw.text((left[0] + 290, legend_y - 2), "sft_i2t_mini", font=small_font, fill=COLORS["text"])
+    draw.text((left[0] + 290, legend_y - 2), before_label, font=small_font, fill=COLORS["text"])
     draw.rectangle((left[0] + 435, legend_y, left[0] + 453, legend_y + 16), fill=after_color)
-    draw.text((left[0] + 460, legend_y - 2), "sft_omni", font=small_font, fill=COLORS["text"])
+    draw.text((left[0] + 460, legend_y - 2), after_label, font=small_font, fill=COLORS["text"])
 
     metrics = (
         ("Mean concept recall", "mean_concept_recall"),
@@ -173,10 +176,14 @@ def main():
     parser.add_argument("--markdown-output", help="optional Markdown summary-table path")
     parser.add_argument("--before-label", default="sft_i2t_mini")
     parser.add_argument("--after-label", default="sft_omni")
+    parser.add_argument("--title", help="optional chart title")
     args = parser.parse_args()
     data = json.loads(Path(args.comparison_json).read_text(encoding="utf-8"))
     _validate_comparison(data)
-    path = render_comparison(data, args.output)
+    path = render_comparison(
+        data, args.output, before_label=args.before_label,
+        after_label=args.after_label, title=args.title,
+    )
     print(path)
     if args.markdown_output:
         markdown_path = Path(args.markdown_output)

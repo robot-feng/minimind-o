@@ -252,7 +252,9 @@ python eval_omni.py --weight sft_omni --mode 4 --prompt_lang 0 --max_new_tokens 
 ```
 
 Audio is saved under `output_dir`; WAV is retained if MP3 export is unavailable.
-After full training, run `bash scripts/eval_full_omni.sh` for a consistent regression pass: text, audio-input and video checks; English image-to-text-and-speech examples on the 9 fixed images; Chinese and English text-only visual evaluation; and a same-prompt, per-image comparison against `sft_i2t_mini`. Per-image JSONL, concept-metric JSON, a PNG comparison chart, a Markdown summary table and generated audio are written to `out/eval_intermediate/` and `out/eval_full_audio/`; interpret the small-set scores together with the actual per-image answers.
+After full training, run `bash scripts/eval_full_omni.sh` for a consistent regression pass: text, audio-input and video checks; English image-to-text-and-speech examples on the 9 fixed images; Chinese and English text-only visual evaluation; a same-prompt, per-image comparison against `sft_i2t_mini`; and a direct reference run with the upstream `jingyaogong/minimind-3o` release using SigLIP2. The upstream model receives its native single-image, one-frame input and its original text-then-image-marker layout; the local TIPSv2 model uses four repeated static-image frames and puts visual markers first. They receive the same images and semantic user prompts while preserving each model's training-time input layout. Per-image JSONL, concept-metric JSON, PNG comparison charts, Markdown summary tables and generated audio are written to `out/eval_intermediate/` and `out/eval_full_audio/`. The release comparison is saved as `sft_omni_vs_minimind-3o-release-siglip2_visual_comparison.png` and `.md`. Interpret the small-set scores together with the actual per-image answers.
+
+Set `EVAL_REFERENCE_MODEL` and `EVAL_REFERENCE_VISION` to use local mirrors or cached paths for the release model and SigLIP2 encoder. The reference run uses the same `eval_omni` samples and greedy decoding.
 For the 9 images in `dataset/eval_omni`, compute concept coverage against the manually checked labels:
 
 ```bash

@@ -5,10 +5,21 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
-from eval_omni import eval_sample, needs_audio_encoder, parse_modes, save_visual_result
+from eval_omni import (
+    eval_sample,
+    format_image_prompt,
+    generate_greedy_text,
+    load_reference_vision,
+    needs_audio_encoder,
+    parse_modes,
+    prepare_reference_image_inputs,
+    resolve_hf_snapshot,
+    save_visual_result,
+)
 from eval_visual_metrics import compare_visual_results, score_visual_results
 
 
@@ -35,6 +46,23 @@ class FakeTextModel:
         return torch.cat((input_ids, generated), dim=1)
 
 
+class FakeReferenceModel:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, input_ids, past_key_values=None, pixel_values=None, **kwargs):
+        self.calls.append({
+            "input_ids": input_ids,
+            "past_key_values": past_key_values,
+            "pixel_values": pixel_values,
+            **kwargs,
+        })
+        token = 5 if len(self.calls) == 1 else 2
+        logits = torch.full((input_ids.size(0), 1, 8), -10.0)
+        logits[:, :, token] = 10.0
+        return SimpleNamespace(logits=logits, past_key_values=("cached",))
+
+
 class FakeAudioModel:
     def generate(self, input_ids, *args, **kwargs):
         self.call = (input_ids, kwargs)
@@ -43,6 +71,99 @@ class FakeAudioModel:
 
 
 class TestTextOnlyEvaluation(unittest.TestCase):
+    def test_hf_snapshot_download_falls_back_to_official_endpoint(self):
+        with patch.dict("os.environ", {
+            "MINIMIND_HF_ENDPOINT": "https://custom-mirror.invalid",
+            "HF_ENDPOINT": "https://configured-mirror.invalid",
+        }), patch("huggingface_hub.snapshot_download", side_effect=[OSError("mirror failed"), "/cache/model"]) as download:
+            resolved = resolve_hf_snapshot("org/reference-model")
+
+        self.assertEqual(resolved, "/cache/model")
+        self.assertEqual(
+            [call.kwargs["endpoint"] for call in download.call_args_list],
+            ["https://custom-mirror.invalid", "https://huggingface.co"],
+        )
+
+    def test_hf_snapshot_uses_existing_local_directory(self):
+        with tempfile.TemporaryDirectory() as model_path, patch("huggingface_hub.snapshot_download") as download:
+            self.assertEqual(resolve_hf_snapshot(model_path), model_path)
+
+        download.assert_not_called()
+
+    def test_reference_siglip_loader_uses_matching_hf_image_processor(self):
+        encoder = torch.nn.Linear(2, 2)
+        processor = object()
+        with tempfile.TemporaryDirectory() as model_path:
+            with patch("eval_omni.AutoModel.from_pretrained", return_value=encoder) as load_model, \
+                    patch("eval_omni.AutoImageProcessor.from_pretrained", return_value=processor) as load_processor:
+                loaded_encoder, loaded_processor = load_reference_vision(model_path)
+
+        self.assertIs(loaded_encoder, encoder)
+        self.assertIs(loaded_processor, processor)
+        self.assertFalse(encoder.weight.requires_grad)
+        self.assertTrue(load_model.call_args.kwargs["local_files_only"])
+        self.assertTrue(load_processor.call_args.kwargs["local_files_only"])
+
+    def test_reference_loader_keeps_tips_custom_processor(self):
+        encoder, processor = object(), object()
+        with patch("eval_omni.MiniMindOmni.load_vision", return_value=(encoder, processor)) as load_vision:
+            loaded = load_reference_vision("google/tipsv2-b14")
+
+        self.assertEqual(loaded, (encoder, processor))
+        load_vision.assert_called_once_with("google/tipsv2-b14")
+
+    def test_reference_prompt_keeps_upstream_text_then_image_layout(self):
+        model = SimpleNamespace(_use_reference_image_layout=True)
+        prompt = format_image_prompt(model, "<image>" * 64, " describe this image ")
+
+        self.assertEqual(prompt, f"describe this image\n\n{'<image>' * 64}")
+
+    def test_local_prompt_keeps_visual_tokens_before_text(self):
+        prompt = format_image_prompt(SimpleNamespace(), "<image>" * 64, "describe this image")
+
+        self.assertEqual(prompt, f"{'<image>' * 64}\n\ndescribe this image")
+
+    def test_reference_image_input_strips_metadata_and_squeezes_one_frame(self):
+        frames = torch.ones(1, 1, 3, 8, 8)
+        result = prepare_reference_image_inputs({
+            "pixel_values": frames,
+            "static_image_mask": torch.tensor([True]),
+        })
+
+        self.assertEqual(set(result), {"pixel_values"})
+        self.assertTrue(torch.equal(result["pixel_values"], frames[:, 0]))
+
+    def test_reference_image_input_rejects_video_frames(self):
+        with self.assertRaisesRegex(ValueError, "one image frame"):
+            prepare_reference_image_inputs({"pixel_values": torch.ones(1, 2, 3, 8, 8)})
+
+    def test_reference_greedy_generation_passes_image_only_on_prefill_and_stops_at_eos(self):
+        model = FakeReferenceModel()
+        prompt = torch.tensor([[1, 3, 4]])
+        pixels = {"pixel_values": torch.ones(1, 1, 3, 8, 8), "static_image_mask": torch.tensor([True])}
+
+        result = generate_greedy_text(model, prompt, eos_token_id=2, max_new_tokens=8, pixel_values=pixels)
+
+        self.assertEqual(result.tolist(), [[1, 3, 4, 5, 2]])
+        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(tuple(model.calls[0]["pixel_values"]["pixel_values"].shape), (1, 3, 8, 8))
+        self.assertIsNone(model.calls[1]["pixel_values"])
+        self.assertIsNotNone(model.calls[1]["past_key_values"])
+
+    def test_eval_sample_uses_reference_greedy_fallback(self):
+        model = FakeReferenceModel()
+        args = SimpleNamespace(
+            device="cpu", open_thinking=0, text_only=True,
+            max_new_tokens=8, temperature=0, top_p=1.0,
+        )
+
+        answer = eval_sample(
+            model, FakeTokenizer(), args, 0, "describe this image", None,
+            "unused.mp3", pixel_values={"pixel_values": torch.ones(1, 1, 3, 8, 8)},
+        )
+
+        self.assertEqual(answer, "5 2")
+
     def test_results_jsonl_requires_visual_mode(self):
         entrypoint = Path(__file__).resolve().parents[1] / "eval_omni.py"
         for args in (

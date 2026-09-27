@@ -251,7 +251,9 @@ python eval_omni.py --weight sft_omni --mode 4 --prompt_lang 0 --max_new_tokens 
 ```
 
 音频写入 `output_dir`；若 MP3 导出依赖不可用，程序会保留 WAV。
-全量训练完成后，可运行 `bash scripts/eval_full_omni.sh` 生成统一回归结果：包含文本、音频输入、视频检查，以及 9 张固定图片的英文图像转语音样例、中英文纯视觉评估和与 `sft_i2t_mini` 的同提示逐图对比。逐图 JSONL、概念指标 JSON、PNG 对比图、Markdown 汇总表与音频文件分别写入 `out/eval_intermediate/` 和 `out/eval_full_audio/`；这套固定集指标仍需结合逐图回答人工判断。
+全量训练完成后，可运行 `bash scripts/eval_full_omni.sh` 生成统一回归结果：包含文本、音频输入、视频检查，以及 9 张固定图片的英文图像转语音样例、中英文纯视觉评估、与 `sft_i2t_mini` 的同提示逐图对比，以及上游发布模型 `jingyaogong/minimind-3o`（SigLIP2）对照。上游参考使用原生单图、单帧输入和原项目的文本后接图像标记布局；本地 TIPSv2 模型按四帧静态图输入、视觉标记前置。两者使用相同图片和语义提示，分别保留各自训练时的输入布局。逐图 JSONL、概念指标 JSON、PNG 对比图、Markdown 汇总表与音频文件分别写入 `out/eval_intermediate/` 和 `out/eval_full_audio/`。对照图表为 `sft_omni_vs_minimind-3o-release-siglip2_visual_comparison.png` 和 `.md`；固定集概念覆盖率还需结合逐图回答人工判断。
+
+若使用本地镜像或缓存路径，可通过 `EVAL_REFERENCE_MODEL` 和 `EVAL_REFERENCE_VISION` 覆盖上游模型与 SigLIP2 编码器位置。参考模型以同一套 `eval_omni` 样本和贪心解码生成逐图回答。
 对 `dataset/eval_omni` 的 9 张图片，还可用人工核对的核心概念计算覆盖率：
 
 ```bash

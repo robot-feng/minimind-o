@@ -6,7 +6,7 @@ import time
 import warnings
 import torch
 from PIL import Image
-from transformers import AutoTokenizer, AutoModelForCausalLM, MimiModel
+from transformers import AutoImageProcessor, AutoModel, AutoTokenizer, AutoModelForCausalLM, MimiModel
 from model.model_omni import MiniMindOmni, OmniConfig
 from dataset.omni_dataset import OmniDataset
 from dataset.video import DEFAULT_VIDEO_FRAMES, VIDEO_EXTENSIONS, format_visual_prompt, prepare_image_inputs, prepare_video_inputs
@@ -31,10 +31,83 @@ def needs_audio_encoder(args):
     return not args.text_only and bool(parse_modes(args.mode).intersection({'2', '5'}))
 
 
+def prepare_reference_image_inputs(pixel_values):
+    """Adapt the one-frame reference model input to its image-only interface."""
+    if pixel_values is None:
+        return None
+    pixels = pixel_values.get('pixel_values') if isinstance(pixel_values, dict) else pixel_values
+    if pixels.ndim == 5:
+        if pixels.size(1) != 1:
+            raise ValueError("the upstream release reference supports one image frame per sample")
+        pixels = pixels[:, 0]
+    return {'pixel_values': pixels}
+
+
+def format_image_prompt(model, image_frame_prompt, prompt_text):
+    if getattr(model, '_use_reference_image_layout', False):
+        return f"{prompt_text.strip()}\n\n{image_frame_prompt.strip()}"
+    return format_visual_prompt(image_frame_prompt, prompt_text)
+
+
+@torch.inference_mode()
+def generate_greedy_text(model, input_ids, eos_token_id, max_new_tokens, pixel_values=None):
+    """Greedy Thinker decoding for released HF models without generate_text()."""
+    if input_ids.size(0) != 1:
+        raise ValueError("reference text evaluation expects one sample at a time")
+    generated = input_ids.new_empty((1, 0))
+    past_key_values = None
+    current_ids = input_ids
+    reference_pixels = prepare_reference_image_inputs(pixel_values)
+    for _ in range(max_new_tokens):
+        kwargs = {
+            'input_ids': current_ids,
+            'past_key_values': past_key_values,
+            'use_cache': True,
+            'logits_to_keep': 1,
+        }
+        if reference_pixels is not None and past_key_values is None:
+            kwargs['pixel_values'] = reference_pixels
+        output = model(**kwargs)
+        past_key_values = output.past_key_values
+        next_token = output.logits[:, -1].argmax(dim=-1, keepdim=True)
+        generated = torch.cat((generated, next_token), dim=1)
+        if torch.all(next_token[:, 0] == eos_token_id):
+            break
+        current_ids = next_token if past_key_values is not None else torch.cat((input_ids, generated), dim=1)
+    return torch.cat((input_ids, generated), dim=1)
+
+
+def resolve_hf_snapshot(path):
+    """Resolve a Hub repo through configured and official endpoints, then use it offline."""
+    if os.path.isdir(path):
+        return path
+    from huggingface_hub import snapshot_download
+
+    endpoints = [os.environ.get('MINIMIND_HF_ENDPOINT'), 'https://huggingface.co', os.environ.get('HF_ENDPOINT')]
+    load_error = None
+    for endpoint in dict.fromkeys(item for item in endpoints if item):
+        try:
+            return snapshot_download(path, endpoint=endpoint)
+        except Exception as error:
+            load_error = error
+    raise OSError(f"Could not download Hugging Face model {path}") from load_error
+
+
+def load_reference_vision(path):
+    """Load the upstream SigLIP2 tower and its matching image processor."""
+    if 'tipsv2' in path.lower():
+        return MiniMindOmni.load_vision(path)
+    model_path = resolve_hf_snapshot(path)
+    vision_encoder = AutoModel.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+    vision_processor = AutoImageProcessor.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+    vision_encoder.requires_grad_(False)
+    return vision_encoder.eval(), vision_processor
+
+
 def init_model(args):
-    tokenizer = AutoTokenizer.from_pretrained(args.load_from)
     load_audio_encoder = needs_audio_encoder(args)
-    if 'model' in args.load_from:
+    if args.load_from == 'model':
+        tokenizer = AutoTokenizer.from_pretrained(args.load_from)
         moe_suffix = '_moe' if args.use_moe else ''
         ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
         model = MiniMindOmni(
@@ -48,12 +121,19 @@ def init_model(args):
         )
         model.load_state_dict(torch.load(ckp, map_location=args.device), strict=False)
     else:
-        model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
+        model_path = resolve_hf_snapshot(args.load_from)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=True, local_files_only=True
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path, trust_remote_code=True, local_files_only=True
+        )
+        model._use_reference_image_layout = True
         if load_audio_encoder:
             model.audio_encoder, model.audio_processor = MiniMindOmni.load_sensevoice("./model/SenseVoiceSmall")
         else:
             model.audio_encoder, model.audio_processor = None, None
-        model.vision_encoder, model.vision_processor = MiniMindOmni.load_vision(args.vision_dir)
+        model.vision_encoder, model.vision_processor = load_reference_vision(args.vision_dir)
     log_model_params(model)
     if model.audio_encoder is not None: model.audio_encoder.to(args.device)
     if model.vision_encoder is not None: model.vision_encoder.to(args.device)
@@ -67,10 +147,15 @@ def eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, output_name, 
     x = torch.tensor(tokenizer(inputs_text).data['input_ids'], dtype=torch.long, device=args.device)[None, ...]
 
     if args.text_only:
-        output_ids = model.generate_text(
-            x, eos_token_id=tokenizer.eos_token_id, max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature, top_p=args.top_p, pixel_values=pixel_values,
-        )
+        if callable(getattr(model, 'generate_text', None)):
+            output_ids = model.generate_text(
+                x, eos_token_id=tokenizer.eos_token_id, max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature, top_p=args.top_p, pixel_values=pixel_values,
+            )
+        else:
+            output_ids = generate_greedy_text(
+                model, x, tokenizer.eos_token_id, args.max_new_tokens, pixel_values,
+            )
         answer = tokenizer.decode(output_ids[0, x.size(1):].tolist(), skip_special_tokens=True)
         print('📒 [Thinker]: ', answer, flush=True)
         return answer
@@ -268,7 +353,7 @@ def main():
             )
             prompts = [["Please describe this image."], ["请描述这张图片"], ["Please describe this image.", "请描述这张图片"]][args.prompt_lang]
             for lang_idx, prompt_text in enumerate(prompts):
-                prompt = format_visual_prompt(image_frame_prompt, prompt_text)
+                prompt = format_image_prompt(model, image_frame_prompt, prompt_text)
                 answer = eval_sample(model, tokenizer, args, idx, prompt, None,
                                      f"image-{idx:02d}-{lang_idx}-{os.path.splitext(image_file)[0]}.mp3",
                                      pixel_values=pixel_values)
