@@ -14,12 +14,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-ROOT = Path("/data/tzq/minimind-o")
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from trainer.training_health import LossStabilityTracker
 
 
-PYTHON = Path("/data/miniconda3/envs/minimind/bin/python")
+PYTHON = Path(sys.executable)
 OUT = ROOT / "out"
 RUNS = OUT / "eval_intermediate" / "tips_single_image_20260927"
 LOG = OUT / "tips_single_image_train.log"
