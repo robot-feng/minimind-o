@@ -6,6 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image, ImageDraw
+
+from scripts.plot_visual_comparison import _font, _legend_layout
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "eval_full_omni.sh"
@@ -61,8 +65,6 @@ class FullEvaluationScriptTests(unittest.TestCase):
             self.assertFalse((results_dir / "sft_omni_image_audio_en_metrics.json").exists())
 
     def test_comparison_plotter_writes_a_png(self):
-        from PIL import Image
-
         comparison = {
             "before": {"mean_concept_recall": 0.25, "all_concepts_hit_rate": 0.0},
             "after": {"mean_concept_recall": 0.5, "all_concepts_hit_rate": 0.25},
@@ -102,6 +104,24 @@ class FullEvaluationScriptTests(unittest.TestCase):
             self.assertIn("Change (final - baseline)", markdown)
             self.assertIn("minimind-3o-release-siglip2", markdown)
             self.assertIn("sft_omni", markdown)
+
+    def test_reference_legend_fits_long_checkpoint_label_without_overlap(self):
+        canvas = Image.new("RGB", (1600, 900))
+        draw = ImageDraw.Draw(canvas)
+        bounds = (65, 160, 1035, 735)
+        labels = (
+            ("minimind-3o-release-siglip2", "#8b95a5"),
+            ("sft_omni", "#3978b5"),
+        )
+
+        layout = _legend_layout(draw, bounds, labels, _font(15))
+
+        first_marker, _, first_text_width, _, _ = layout[0]
+        second_marker, second_text_x, second_text_width, _, _ = layout[1]
+        self.assertLess(first_marker, second_marker)
+        self.assertLessEqual(first_marker + 18 + 8 + first_text_width, second_marker)
+        self.assertGreaterEqual(first_marker, bounds[0])
+        self.assertLessEqual(second_text_x + second_text_width, bounds[2])
 
     def test_comparison_plotter_rejects_missing_image_answers(self):
         comparison = {

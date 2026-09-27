@@ -45,6 +45,18 @@ def _short_image_label(index):
     return f"{index:02d}"
 
 
+def _legend_layout(draw, bounds, items, font, marker_width=18, text_gap=8, item_gap=28):
+    label_widths = [draw.textlength(label, font=font) for label, _ in items]
+    item_widths = [marker_width + text_gap + width for width in label_widths]
+    total_width = sum(item_widths) + item_gap * max(0, len(items) - 1)
+    x = (bounds[0] + bounds[2] - total_width) / 2
+    layout = []
+    for (label, color), label_width, item_width in zip(items, label_widths, item_widths):
+        layout.append((x, x + marker_width + text_gap, label_width, label, color))
+        x += item_width + item_gap
+    return layout
+
+
 def _validate_comparison(data):
     for section in ("before", "after"):
         for key in ("mean_concept_recall", "all_concepts_hit_rate"):
@@ -136,10 +148,10 @@ def render_comparison(
         _text_center(draw, center, plot_bottom + 12, _short_image_label(index + 1), small_font, COLORS["text"])
 
     legend_y = 180
-    draw.rectangle((left[0] + 265, legend_y, left[0] + 283, legend_y + 16), fill=before_color)
-    draw.text((left[0] + 290, legend_y - 2), before_label, font=small_font, fill=COLORS["text"])
-    draw.rectangle((left[0] + 435, legend_y, left[0] + 453, legend_y + 16), fill=after_color)
-    draw.text((left[0] + 460, legend_y - 2), after_label, font=small_font, fill=COLORS["text"])
+    legend_items = ((before_label, before_color), (after_label, after_color))
+    for marker_x, text_x, _, label, color in _legend_layout(draw, left, legend_items, small_font):
+        draw.rectangle((marker_x, legend_y, marker_x + 18, legend_y + 16), fill=color)
+        draw.text((text_x, legend_y - 2), label, font=small_font, fill=COLORS["text"])
 
     metrics = (
         ("Mean concept recall", "mean_concept_recall"),
